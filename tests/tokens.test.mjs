@@ -117,6 +117,36 @@ describe("parseTranscriptTokens（单会话 Token 解析与缓存）", () => {
       assert.equal(second.lastCall.stepIndex, 2);
     });
   });
+
+  it("parseTranscriptTokens 按 LRU 顺序刷新与淘汰缓存而非 FIFO", async () => {
+    await withTempDir(async (dir) => {
+      const { iso } = localNoonIso();
+      const fileA = join(dir, "a.jsonl");
+      const fileB = join(dir, "b.jsonl");
+      const fileC = join(dir, "c.jsonl");
+      for (const [idx, f] of [fileA, fileB, fileC].entries()) {
+        writeJsonl(f, [
+          {
+            step_index: 1,
+            type: "PLANNER_RESPONSE",
+            input_tokens: 100 + idx,
+            cache_read_tokens: 0,
+            output_tokens: 10,
+            created_at: iso,
+          },
+        ]);
+      }
+
+      const sumA1 = parseTranscriptTokens(fileA, { maxCache: 2 });
+      const sumB1 = parseTranscriptTokens(fileB, { maxCache: 2 });
+      assert.equal(parseTranscriptTokens(fileA, { maxCache: 2 }), sumA1);
+
+      // 写入 fileC 应淘汰最久未访问的 fileB，而保留最近命中过的 fileA
+      parseTranscriptTokens(fileC, { maxCache: 2 });
+      assert.equal(parseTranscriptTokens(fileA, { maxCache: 2 }), sumA1);
+      assert.notEqual(parseTranscriptTokens(fileB, { maxCache: 2 }), sumB1);
+    });
+  });
 });
 
 describe("collectTokenStats（跨目录、跨日期与当前会话聚合）", () => {

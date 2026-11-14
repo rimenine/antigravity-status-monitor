@@ -4,7 +4,24 @@ import { dirname, join, resolve } from "node:path";
 const fileCache = new Map();
 const collectCache = new Map();
 const CHUNK_BYTES = 256 * 1024;
-const MAX_FILE_CACHE = 500;
+const MAX_FILE_CACHE = 4096;
+
+function getFileCacheEntry(filePath) {
+  const cached = fileCache.get(filePath);
+  if (!cached) return null;
+  fileCache.delete(filePath);
+  fileCache.set(filePath, cached);
+  return cached;
+}
+
+function setFileCacheEntry(filePath, entry, maxCache = MAX_FILE_CACHE) {
+  const limit = Math.max(1, Number(maxCache) || MAX_FILE_CACHE);
+  fileCache.delete(filePath);
+  while (fileCache.size >= limit) {
+    fileCache.delete(fileCache.keys().next().value);
+  }
+  fileCache.set(filePath, entry);
+}
 
 export function resolveTranscriptLogPath(rootOrLogsDir, convId = null) {
   if (!rootOrLogsDir) return null;
@@ -124,7 +141,7 @@ function readSlice(fd, offset, length) {
   return n === length ? buf : Buffer.from(buf.subarray(0, n));
 }
 
-export function parseTranscriptTokens(filePath) {
+export function parseTranscriptTokens(filePath, { maxCache = MAX_FILE_CACHE } = {}) {
   if (!filePath || !existsSync(filePath)) return null;
 
   let stat;
@@ -134,7 +151,7 @@ export function parseTranscriptTokens(filePath) {
     return null;
   }
 
-  const cached = fileCache.get(filePath);
+  const cached = getFileCacheEntry(filePath);
   if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
     return cached.summary;
   }
@@ -210,18 +227,19 @@ export function parseTranscriptTokens(filePath) {
         daily: finalState.daily,
       };
 
-      if (!fileCache.has(filePath) && fileCache.size >= MAX_FILE_CACHE) {
-        fileCache.delete(fileCache.keys().next().value);
-      }
-      fileCache.set(filePath, {
-        mtimeMs: stat.mtimeMs,
-        size: stat.size,
-        ino: stat.ino || 0,
-        headFp,
-        tailFp,
-        state,
-        summary,
-      });
+      setFileCacheEntry(
+        filePath,
+        {
+          mtimeMs: stat.mtimeMs,
+          size: stat.size,
+          ino: stat.ino || 0,
+          headFp,
+          tailFp,
+          state,
+          summary,
+        },
+        maxCache,
+      );
 
       return summary;
     } finally {

@@ -22,6 +22,11 @@ export {
   summarizeLsConnections,
 } from "./process-probe.mjs";
 
+export function buildProxyProbeRequest(u) {
+  const path = `${u.pathname || "/"}${u.search || ""}`;
+  return `GET ${path} HTTP/1.1\r\nHost: ${u.host}\r\nUser-Agent: agy-status-monitor/1.1\r\nConnection: close\r\n\r\n`;
+}
+
 export function isProxyConnectOk(firstLine) {
   return /^HTTP\/\d(?:\.\d)?\s+200(?:\s|$)/i.test(String(firstLine || "").trim());
 }
@@ -252,10 +257,7 @@ export function probeViaProxy(targetUrl, proxy, timeoutMs = 2500) {
           ? { socket: tcpSocket, servername: cleanHost }
           : { socket: tcpSocket };
         tlsSocket = tls.connect(tlsOpts, () => {
-          const path = `${u.pathname || "/"}${u.search || ""}`;
-          tlsSocket.write(
-            `GET ${path} HTTP/1.1\r\nHost: ${u.hostname}\r\nUser-Agent: agy-status-monitor/1.1\r\nConnection: close\r\n\r\n`,
-          );
+          tlsSocket.write(buildProxyProbeRequest(u));
         });
 
         tlsSocket.once("error", (err) => {

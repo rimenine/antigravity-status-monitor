@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import { describe, it } from "node:test";
 import {
+  buildProxyProbeRequest,
   getEnvProxy,
   isNoProxyTarget,
   isProbeHttpOk,
@@ -375,5 +376,16 @@ describe("probe 跨平台解析与汇总（Windows / macOS / Linux）", () => {
     socksIpSrv.close();
     assert.equal(ipRes.ok, false);
     assert.match(ipRes.error, /SOCKS5 隧道失败/);
+  });
+
+  it("buildProxyProbeRequest 在非 443 端口及 IPv6 地址上正确构造 Host 头", () => {
+    const customPortReq = buildProxyProbeRequest(new URL("https://example.com:8443/health?v=1"));
+    assert.match(customPortReq, /^GET \/health\?v=1 HTTP\/1\.1\r\nHost: example\.com:8443\r\n/);
+
+    const defaultPortReq = buildProxyProbeRequest(new URL("https://example.com:443"));
+    assert.match(defaultPortReq, /^GET \/ HTTP\/1\.1\r\nHost: example\.com\r\n/);
+
+    const ipv6PortReq = buildProxyProbeRequest(new URL("https://[::1]:9443/ping"));
+    assert.match(ipv6PortReq, /^GET \/ping HTTP\/1\.1\r\nHost: \[::1\]:9443\r\n/);
   });
 });
