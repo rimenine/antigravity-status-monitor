@@ -1,0 +1,18 @@
+{
+  "agent-status-heartbeat": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "agy-node hooks/hook-reporter.mjs PreInvocation || node hooks/hook-reporter.mjs PreInvocation",
+        "timeout": 3
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "agy-node hooks/hook-reporter.mjs Stop || node hooks/hook-reporter.mjs Stop",
+        "timeout": 3
+      }
+    ]
+  }
+}

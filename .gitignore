@@ -1,0 +1,12 @@
+# Local Sidecar runtime state, ports, tokens, and user preferences
+.runtime/
+
+# Dependencies (none required; keep clean if someone runs npm install)
+node_modules/
+
+# Logs and temporary artifacts
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+desktop.ini

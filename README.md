@@ -1,0 +1,172 @@
+**简体中文** | [English](README.en.md)
+
+# 反重力实时状态监控 (`antigravity-status-monitor`)
+
+用 Antigravity 跑长任务时，经常会遇到主界面一直转着 **"Working"** 却迟迟没有输出——有时模型确实还在思考或调用本地工具，但很多时候其实是 **VPN 断连**、TUN 虚拟网卡异常或代理失效，请求已经卡死，界面却仍停在“假性工作中”状态。
+
+这个**零第三方依赖**的 Sidecar 面板挂在右侧辅助栏里，把生命周期 Hooks、`transcript.jsonl` 写入、宿主 `Language Server` 连接状态与上游 HTTPS 探针汇总到一起，帮你快速分辨当前是在正常执行，还是因为 **VPN / 代理断连** 导致挂起，同时附带会话与历史 Token 统计。
+
+---
+
+## 界面预览
+
+| 实时工作态与探针曲线 | 断网挂起告警与桌面通知 | 监控配置与实时事件流 |
+| :---: | :---: | :---: |
+| <img src="docs/screenshots/status-working.jpg" alt="实时工作态与 HTTPS 探针曲线" width="240" /> | <img src="docs/screenshots/alert-preview.jpg" alt="断网挂起告警与系统通知" width="240" /> | <img src="docs/screenshots/settings-events.jpg" alt="监控配置与实时事件流" width="240" /> |
+
+---
+
+## 工作原理
+
+单看主界面的加载动画很难判断卡在哪一步，插件把四路直接信号拼在一起判断：
+
+1. **Lifecycle Hooks + Transcript 日志联动计时**
+   - [hooks.json](hooks.json) 只挂载 `PreInvocation` 与 `Stop` 两个关键事件（默认优先调用内置 `agy-node`，没装全局 Node 也能跑）；
+   - 只要 `transcript.jsonl` 有新输出，或者有新 Hook 进来，等待计时就会立刻归零——不会把正常的多工具长任务误判成卡死。
+2. **双链路 HTTPS 短连接探针（直连/TUN vs 代理）**
+   - 按设定周期分别走直连和代理测一次短连接可达性（默认探测 `https://daily-cloudcode-pa.googleapis.com`），支持自动读取环境变量/系统代理，也可以在设置里手动填写 HTTP `Basic` 或无认证 SOCKS5 代理，再结合宿主 `Language Server` 的 443 端口连接状态一起判断链路是否正常。
+   - **SSE 实时推送 + 轮询兜底**：界面通过 `/api/events` 接收实时变化；如果流断开，会自动切回 `/api/status` 轮询。
+3. **宿主进程追踪与自动退出**
+   - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；如果 Antigravity 已经关掉且 `/healthz` 连续连不上，Sidecar 会自动退出，不在后台留孤儿进程。
+4. **本地接口防护**
+   - 仅监听 `127.0.0.1`；写入类 `POST` 接口要求 `Content-Type: application/json`，校验受信任应用或回环 `Origin`（如 `plugin://` / `vscode-webview://` / 本地回环，允许原生无 Origin 请求但拦截 `Origin: null`），在宿主注入 `ANTIGRAVITY_SIDECAR_UI_TOKEN` 时强制校验 `X-Sidecar-Token`；Hook 上报使用独立的随机 `X-Hook-Token`。
+
+---
+
+## 已知局限与边界
+
+这只是一个轻量的 Sidecar 状态面板，并非内核级抓包工具，以下边界需要注意：
+
+* **新建短探针能通 ≠ 旧的长连接还活着**：网络探针是周期性新建 HTTPS GET 短连接测试域名 / TLS / HTTP 是否通畅（`2xx/3xx` 及 `400/404/405/410` 视为上游有响应，因为 `daily-cloudcode-pa.googleapis.com` 根路径默认返回 `404`；`401/403/407/408/429/451` 与 `5xx` 均判定为阻塞或失败）。如果只是代理节点波动导致**原本那条流式长连接半开假死**，而新建探针刚好切换到了可用节点，面板会倾向显示“网络正常 / 疑似模型卡顿”。
+* **代理与 TUN 识别覆盖范围**：支持环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`）、Windows 注册表 `HKCU`/`HKLM`（含 `ProxyOverride` 绕过列表与 `DefaultConnectionSettings` 开关校验）、macOS `scutil`（含 `ExceptionsList`）、Linux GNOME `gsettings`（含 `ignore-hosts`）中的 **HTTP 代理**（含基础 `Basic` 鉴权）与**无认证 SOCKS5 代理**，并支持设置面板里的**「手动代理」**兜底（适合 PAC、非 GNOME 桌面、纯 SOCKS5 等场景）；**暂不支持解析 PAC 脚本（会给提示）、`https://`/`socks4://` 代理、带密码的 SOCKS5、企业 NTLM 域认证或按进程注入式透明分流工具；公司网关若使用了未导入 Node 信任链的中间人自签根证书，也可能报 TLS 失败**。TUN 网卡基于 `198.18.0.0/15`（Fake-IP）与 `100.64.0.0/10`（CGNAT / Tailscale / WireGuard 等常见段）做启发式归类。
+* **Hooks 与常驻开销**：Antigravity 每次 `PreInvocation` / `Stop` 时会拉起一次短暂的轻量 Hook 进程；Sidecar 本身为常驻本地 Node 进程。
+* **本地只读接口范围**：为了兼容 `EventSource` 与内置桥接页，`GET /api/status` 与 `GET /api/events` 在 `127.0.0.1` 保持只读开放；未从 Antigravity Sidecar 容器启动（无 `ANTIGRAVITY_SIDECAR_UI_TOKEN`）时会跳过 UI Token 校验，仍只允许空 Origin、回环与受信任应用容器 Origin（拦截 `Origin: null` 防范沙盒 CSRF）。
+* **Token 统计口径**：`total` 直接累加 `input_tokens + cache_read_tokens + output_tokens` 的原始次数，用来直观感受工作量与缓存命中趋势即可，不能直接等同于官方计费或配额扣减；当前会话优先走 Hook 上报路径，全量历史统计扫描 `transcript.jsonl`（不存在时回退 `transcript_full.jsonl`）。
+
+---
+
+## 跨平台支持矩阵
+
+| 平台 | HTTPS 可达性探针 | 系统代理探测 | Language Server & 443 套接字检测 | 系统桌面通知 | 验证程度 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Windows** | 支持 | 环境变量 + 注册表 `HKCU`/`HKLM`（HTTP / SOCKS5 / `ProxyOverride`；PAC 提示不支持，可手动指定代理） | `netstat -ano -p TCP` + `tasklist` + CIM | PowerShell WinRT Toast 通知 | **实机长运行验证** + CI 集成测试 |
+| **macOS** | 支持 | 环境变量 + `scutil --proxy`（HTTP / SOCKS5；PAC 提示不支持，可手动指定代理） | `lsof -nP -iTCP` + `pgrep`/`ps` | `osascript` 系统通知 | 单元测试 + GitHub Actions macOS CI |
+| **Linux** | 支持 | 环境变量（含 `ALL_PROXY`/`NO_PROXY`）+ GNOME `gsettings`（HTTP/SOCKS/PAC；非 GNOME 可用环境变量或手动代理） | `ss -tnap`（回退 `lsof`）+ `pgrep`/`ps` | `notify-send` | 单元测试 + GitHub Actions Ubuntu CI |
+
+---
+
+## 快速安装与卸载
+
+### 方式一：自动检测安装脚本（推荐）
+
+```powershell
+# Windows (PowerShell)
+git clone https://github.com/rimenine/antigravity-status-monitor.git
+cd antigravity-status-monitor
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+```bash
+# macOS / Linux
+git clone https://github.com/rimenine/antigravity-status-monitor.git
+cd antigravity-status-monitor
+sh ./install.sh
+```
+
+脚本会自动检测 `~/.gemini/config` 和 `agy-node` / `node`，只拷贝运行必需文件（跳过 `tests/`、`docs/`、`.github/`、`.git/` 与 `README.en.md`），已有的 `.runtime/config.json` 配置也会原样保留。
+
+卸载（脚本会自动先清理配置并停止运行中的 Sidecar；如果 Antigravity 正开着，建议先停用插件或关闭 IDE 再卸载，避免宿主保活拉起）：
+
+```powershell
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1              # 完全卸载
+powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -KeepConfig  # 卸载但保留配置文件
+```
+
+```bash
+# macOS / Linux
+sh ./uninstall.sh                # 完全卸载
+sh ./uninstall.sh --keep-config  # 卸载但保留配置文件
+```
+
+### 方式二：直接克隆到 Antigravity 插件目录
+
+```bash
+# macOS / Linux
+cd ~/.gemini/config/plugins
+git clone https://github.com/rimenine/antigravity-status-monitor.git
+```
+
+```powershell
+# Windows (PowerShell)
+cd "$env:USERPROFILE\.gemini\config\plugins"
+git clone https://github.com/rimenine/antigravity-status-monitor.git
+```
+
+安装后打开或重启 Antigravity，在对话中发送 **`打开反重力状态监控面板`** 即可唤出右侧面板。
+
+---
+
+## 功能与配置说明
+
+- **顶部按钮**：`探测`（立即测速）、`预览告警`（15 秒模拟断网挂起效果）、**齿轮图标**（展开设置）。
+- **可调参数**：探测频率（`2s` / `3s` / `5s`）、卡顿预警阈值（`15s` / `25s` / `45s`）、探测目标、手动代理、主题模式（跟随宿主 / 深色 / 浅色）、断网系统通知开关。
+
+---
+
+## 目录结构
+
+```text
+antigravity-status-monitor/
+├── package.json                    # 插件元数据与测试入口（npm test）
+├── plugin.json                     # Antigravity 插件清单
+├── .github/workflows/ci.yml        # GitHub Actions 三平台自动化 CI
+├── hooks.json                      # 生命周期 Hooks（PreInvocation + Stop）
+├── install.ps1 / uninstall.ps1     # Windows 一键检测安装 / 卸载脚本
+├── install.sh / uninstall.sh       # macOS / Linux 一键检测安装 / 卸载脚本
+├── LICENSE                         # MIT 开源协议
+├── README.md                       # 中文说明文档
+├── README.en.md                    # 英文说明文档（English README）
+├── assets/logo.svg                 # 插件图标
+├── docs/screenshots/               # README 界面预览截图
+├── hooks/hook-reporter.mjs         # Hook 事件上报脚本（X-Hook-Token 鉴权）
+├── skills/status-monitor/SKILL.md  # 状态监控与排查引导 Skill
+├── tests/                          # 单元测试与真实系统命令集成测试（node:test）
+└── sidecars/status-monitor/
+    ├── sidecar.json                # Sidecar 注册配置
+    ├── server.mjs                  # HTTP 服务、安全校验、SSE 广播与调度
+    ├── lib/
+    │   ├── config.mjs              # 运行时路径与配置持久化
+    │   ├── i18n.mjs                # 中英文双语文案、事件与通知翻译
+    │   ├── security.mjs            # CSRF 防护、Content-Type 与双令牌鉴权
+    │   ├── sdk-bridge.mjs          # sidecar_sdk 桥接（/preload.js 与 AgentAPI）
+    │   ├── state-store.mjs         # 多会话状态隔离与 Transcript 解析
+    │   ├── verdict.mjs             # 纯函数状态诊断引擎
+    │   ├── proxy.mjs               # 代理配置校验、Bypass/CIDR 与系统代理识别
+    │   ├── process-probe.mjs       # Language Server 进程、端口与路由探查
+    │   ├── notify.mjs              # 跨平台桌面系统通知（WinRT / AppleScript / libnotify）
+    │   ├── probe.mjs               # 直连与代理隧道 HTTPS 上游探测（统一导出门面）
+    │   └── tokens.mjs              # Token 计量解析与缓存聚合
+    └── public/
+        ├── index.html
+        ├── styles.css
+        └── app.js
+```
+
+---
+
+## 运行自动化测试
+
+零第三方依赖，可直接使用系统 Node 或 Antigravity 内置 `agy-node` 运行：
+
+```bash
+npm test
+# 或使用 Antigravity 内置运行时：
+agy-node --test tests/*.test.mjs
+```
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 [rimenine](https://github.com/rimenine)

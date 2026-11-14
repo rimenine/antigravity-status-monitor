@@ -1,0 +1,18 @@
+{
+  "name": "agent-status-monitor",
+  "displayName": "Antigravity Status Monitor",
+  "version": "1.0.0",
+  "description": "Real-time Antigravity Sidecar to track agent phases, Lifecycle Hooks, upstream reachability, and session token stats — helping distinguish active work from silent \"Working\" hangs.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open the Antigravity Status Monitor panel",
+    "Check whether the agent is actively working or silently hung",
+    "Set the status monitor stall threshold to 20 seconds"
+  ],
+  "author": {
+    "name": "rimenine",
+    "url": "https://github.com/rimenine"
+  },
+  "homepage": "https://github.com/rimenine/antigravity-status-monitor",
+  "repository": "https://github.com/rimenine/antigravity-status-monitor"
+}

@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  verify:
+    name: ${{ matrix.os }} (Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Check JS/MJS syntax
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Recurse -File -Include '*.js','*.mjs' | Where-Object { $_.FullName -notmatch '([\\/])(\.git|\.runtime|node_modules)\1' }
+          foreach ($f in $files) {
+            node --check $f.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Syntax check failed: $($f.FullName)" }
+          }
+          Write-Host "Checked $($files.Count) JS/MJS files."
+
+      - name: Run unit & real OS integration tests
+        env:
+          ASM_CI_OUTBOUND: "1"
+        run: npm test
+
+      - name: Test Unix installer & uninstaller (Ubuntu / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          SANDBOX="$(mktemp -d)"
+          trap 'rm -rf "$SANDBOX"' EXIT
+
+          sh -n ./install.sh
+          sh -n ./uninstall.sh
+
+          sh ./install.sh "$SANDBOX"
+          test -f "$SANDBOX/agent-status-monitor/plugin.json"
+          test -f "$SANDBOX/agent-status-monitor/sidecars/status-monitor/server.mjs"
+          test -x "$SANDBOX/agent-status-monitor/uninstall.sh"
+
+          mkdir -p "$SANDBOX/agent-status-monitor/.runtime"
+          printf '{"lang":"en"}\n' > "$SANDBOX/agent-status-monitor/.runtime/config.json"
+
+          sh "$SANDBOX/agent-status-monitor/uninstall.sh" "$SANDBOX" --keep-config
+          test -f "$SANDBOX/agent-status-monitor/.runtime/config.json"
+          test ! -f "$SANDBOX/agent-status-monitor/plugin.json"
+
+          sh ./install.sh "$SANDBOX"
+          sh "$SANDBOX/agent-status-monitor/uninstall.sh" "$SANDBOX"
+          test ! -d "$SANDBOX/agent-status-monitor"
+
+      - name: Test Windows installer & uninstaller
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sandbox = Join-Path $env:TEMP ("asm-ci-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+          New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
+          try {
+            pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -PluginsRoot $sandbox
+            if ($LASTEXITCODE -ne 0) { throw 'install.ps1 failed' }
+            if (-not (Test-Path "$sandbox\agent-status-monitor\plugin.json")) { throw 'plugin.json missing' }
+
+            New-Item -ItemType Directory -Force -Path "$sandbox\agent-status-monitor\.runtime" | Out-Null
+            [IO.File]::WriteAllText("$sandbox\agent-status-monitor\.runtime\config.json", '{"lang":"en"}', [Text.UTF8Encoding]::new($false))
+
+            pwsh -NoProfile -ExecutionPolicy Bypass -File "$sandbox\agent-status-monitor\uninstall.ps1" -PluginsRoot $sandbox -KeepConfig
+            if ($LASTEXITCODE -ne 0) { throw 'uninstall.ps1 -KeepConfig failed' }
+            if (-not (Test-Path "$sandbox\agent-status-monitor\.runtime\config.json")) { throw 'config.json was not preserved' }
+            if (Test-Path "$sandbox\agent-status-monitor\plugin.json") { throw 'plugin.json still exists after uninstall' }
+
+            pwsh -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -PluginsRoot $sandbox
+            pwsh -NoProfile -ExecutionPolicy Bypass -File "$sandbox\agent-status-monitor\uninstall.ps1" -PluginsRoot $sandbox
+            if ($LASTEXITCODE -ne 0) { throw 'uninstall.ps1 clean failed' }
+            if (Test-Path "$sandbox\agent-status-monitor") { throw 'plugin directory not deleted' }
+          } finally {
+            Remove-Item -Path $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+          }
