@@ -11,12 +11,14 @@ import {
   PUBLIC_DIR,
   sanitizeConfigForClient,
   SERVER_INFO_PATH,
+  SERVERS_DIR,
 } from "./lib/config.mjs";
 import { getNotificationText } from "./lib/i18n.mjs";
 import { sendDesktopNotification } from "./lib/notify.mjs";
 import { probePaths } from "./lib/probe.mjs";
 import { getLsEndpoints, inspectLanguageServer } from "./lib/process-probe.mjs";
 import { getEnvProxy, invalidateProxyCache } from "./lib/proxy.mjs";
+import { readRegisteredServers, resolveServerInstanceFilename } from "./lib/runtime-paths.mjs";
 import { createSdkBridge } from "./lib/sdk-bridge.mjs";
 import { createSecurityGuard, isAllowedHost } from "./lib/security.mjs";
 import { createStateStore } from "./lib/state-store.mjs";
@@ -102,8 +104,10 @@ function sendJson(res, status, data, req = null) {
 export async function createStatusServer({
   configPath = CONFIG_PATH,
   serverInfoPath = SERVER_INFO_PATH,
+  serversDir = undefined,
   brainDirs,
-  fallbackHookPath,
+  fallbackHookPath = undefined,
+  fallbackHooksDir = undefined,
   uiToken,
   hookToken,
   lsAddress = LS_ADDRESS,
@@ -117,7 +121,18 @@ export async function createStatusServer({
   exitFn = (code) => process.exit(code),
 } = {}) {
   const config = loadConfig(configPath);
-  const store = createStateStore({ brainDirs, fallbackHookPath });
+  const store = createStateStore({ brainDirs, fallbackHookPath, fallbackHooksDir, lsAddress });
+  const resolvedServersDir =
+    serversDir !== undefined
+      ? serversDir
+      : serverInfoPath === SERVER_INFO_PATH
+        ? SERVERS_DIR
+        : serverInfoPath
+          ? join(dirname(serverInfoPath), "servers")
+          : null;
+  let activeInstancePath = null;
+  let listeningPort = null;
+  let wroteLegacyServerInfo = false;
   const security = createSecurityGuard({ uiToken, hookToken });
   const sdkBridge = sdkBridgeImpl || (await createSdkBridge());
 
@@ -467,13 +482,49 @@ export async function createStatusServer({
     );
   }
 
+  function serializeServerRecord(rec) {
+    return {
+      port: rec.port,
+      pid: rec.pid,
+      startedAt: rec.startedAt,
+      hookToken: rec.hookToken,
+      lsAddress: rec.lsAddress || null,
+      conversationId: rec.conversationId || null,
+    };
+  }
+
   function cleanupServerFile() {
-    if (!writeServerInfo || !serverInfoPath) return;
+    if (!writeServerInfo) return;
+    if (activeInstancePath) {
+      try {
+        if (existsSync(activeInstancePath)) {
+          unlinkSync(activeInstancePath);
+        }
+      } catch {
+      }
+      activeInstancePath = null;
+    }
+    const ownedPort = listeningPort;
+    const ownedLegacy = wroteLegacyServerInfo;
+    listeningPort = null;
+    wroteLegacyServerInfo = false;
+    if (!serverInfoPath || !ownedLegacy) return;
     try {
       if (existsSync(serverInfoPath)) {
         const info = JSON.parse(readFileSync(serverInfoPath, "utf8"));
-        if (info?.pid === process.pid) {
-          unlinkSync(serverInfoPath);
+        if (info?.pid === process.pid && (!ownedPort || !info?.port || info.port === ownedPort)) {
+          const remaining = resolvedServersDir
+            ? readRegisteredServers({ serversDir: resolvedServersDir, pruneDead: true })
+            : [];
+          if (remaining.length > 0) {
+            writeFileSync(
+              serverInfoPath,
+              JSON.stringify(serializeServerRecord(remaining[0]), null, 2),
+              { encoding: "utf8", mode: 0o600 },
+            );
+          } else {
+            unlinkSync(serverInfoPath);
+          }
         }
       }
     } catch {
@@ -582,7 +633,10 @@ export async function createStatusServer({
       try {
         const body = await readJsonBody(req);
         store.applyHookEvent(body, true);
-        store.clearFallbackHook(body?.receivedAt ?? Infinity);
+        store.clearFallbackHook(body?.receivedAt ?? Infinity, {
+          conversationId: body?.payload?.conversationId || null,
+          lsAddress: body?.lsAddress || null,
+        });
         sendJson(res, 200, { ok: true });
         setImmediate(() => {
           try {
@@ -696,23 +750,36 @@ export async function createStatusServer({
       server.listen(port, host, () => {
         server.off("error", rejectListen);
         const actualPort = server.address().port;
-        if (writeServerInfo && serverInfoPath) {
-          if (serverInfoPath === SERVER_INFO_PATH) ensureRuntimeDir();
-          else mkdirSync(dirname(serverInfoPath), { recursive: true });
-          writeFileSync(
-            serverInfoPath,
-            JSON.stringify(
-              {
-                port: actualPort,
-                pid: process.pid,
-                startedAt: Date.now(),
-                hookToken: security.hookToken,
-              },
-              null,
-              2,
-            ),
-            { encoding: "utf8", mode: 0o600 },
-          );
+        listeningPort = actualPort;
+        if (writeServerInfo && (serverInfoPath || resolvedServersDir)) {
+          const record = {
+            port: actualPort,
+            pid: process.pid,
+            startedAt: Date.now(),
+            hookToken: security.hookToken,
+            lsAddress: lsAddress || null,
+            conversationId: sdkBridge.config.conversationId || null,
+          };
+          if (resolvedServersDir) {
+            mkdirSync(resolvedServersDir, { recursive: true });
+            activeInstancePath = join(
+              resolvedServersDir,
+              resolveServerInstanceFilename(process.pid, actualPort),
+            );
+            writeFileSync(activeInstancePath, JSON.stringify(record, null, 2), {
+              encoding: "utf8",
+              mode: 0o600,
+            });
+          }
+          if (serverInfoPath) {
+            if (serverInfoPath === SERVER_INFO_PATH) ensureRuntimeDir();
+            else mkdirSync(dirname(serverInfoPath), { recursive: true });
+            writeFileSync(serverInfoPath, JSON.stringify(record, null, 2), {
+              encoding: "utf8",
+              mode: 0o600,
+            });
+            wroteLegacyServerInfo = true;
+          }
         }
 
         if (!disableSchedulers) {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import {
   inspectLanguageServer,
   parseScutilProxy,
 } from "../sidecars/status-monitor/lib/probe.mjs";
+import { readRegisteredServers } from "../sidecars/status-monitor/lib/runtime-paths.mjs";
 import { PLUGIN_ROOT, withTempDir } from "./helpers.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -338,6 +339,103 @@ describe("真实系统命令与子进程集成测试", () => {
           } catch {}
         } else {
           await stopChild(child);
+        }
+      }
+    });
+  });
+
+  it("多窗口独立 Sidecar 进程并存时，hook-reporter 按 LS 地址精准投递且清理死亡进程注册表", async () => {
+    await withTempDir(async (dir) => {
+      const runtimeDir = join(dir, ".runtime");
+      const serversDir = join(runtimeDir, "servers");
+      const appDataDir = join(dir, "appdata");
+      mkdirSync(runtimeDir, { recursive: true });
+      mkdirSync(join(appDataDir, "brain"), { recursive: true });
+
+      const spawnSidecar = (lsAddress, uiToken) =>
+        spawn(process.execPath, [join(PLUGIN_ROOT, "sidecars/status-monitor/server.mjs")], {
+          env: {
+            ...process.env,
+            ASM_RUNTIME_DIR: runtimeDir,
+            ANTIGRAVITY_APP_DATA_DIR: appDataDir,
+            ANTIGRAVITY_CONVERSATION_ID: "",
+            ANTIGRAVITY_LS_ADDRESS: lsAddress,
+            ANTIGRAVITY_SIDECAR_UI_TOKEN: uiToken,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+
+      const child1 = spawnSidecar("127.0.0.1:41111", "tok-win-1");
+      const child2 = spawnSidecar("127.0.0.1:42222", "tok-win-2");
+
+      try {
+        const deadline = Date.now() + 8000;
+        let win1Info = null;
+        let win2Info = null;
+        while (Date.now() < deadline) {
+          if (existsSync(serversDir)) {
+            const list = readRegisteredServers({ serversDir });
+            win1Info = list.find((s) => s.lsAddress === "127.0.0.1:41111") || null;
+            win2Info = list.find((s) => s.lsAddress === "127.0.0.1:42222") || null;
+            if (win1Info && win2Info) break;
+          }
+          await new Promise((r) => setTimeout(r, 80));
+        }
+        assert.ok(win1Info && win2Info, "Both Sidecar instances should register in .runtime/servers");
+
+        const hookRes = await new Promise((resolve, reject) => {
+          const hk = spawn(process.execPath, [join(PLUGIN_ROOT, "hooks/hook-reporter.mjs"), "PreInvocation"], {
+            env: {
+              ...process.env,
+              PLUGIN_ROOT,
+              ASM_RUNTIME_DIR: runtimeDir,
+              ANTIGRAVITY_CONVERSATION_ID: "",
+              ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:41111",
+            },
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          hk.on("error", reject);
+          hk.on("close", (code) => resolve(code));
+          hk.stdin.end(JSON.stringify({ conversationId: "conv-win1-only", invocationNum: 1 }));
+        });
+        assert.equal(hookRes, 0);
+
+        const s1 = JSON.parse(
+          (await httpRequest(win1Info.port, "GET", "/api/status", { headers: { "X-Sidecar-Token": "tok-win-1" } })).body,
+        );
+        const s2 = JSON.parse(
+          (await httpRequest(win2Info.port, "GET", "/api/status", { headers: { "X-Sidecar-Token": "tok-win-2" } })).body,
+        );
+        assert.equal(s1.activeConversationId, "conv-win1-only");
+        assert.equal(s1.hook.phase, "waiting_llm");
+        assert.notEqual(s2.activeConversationId, "conv-win1-only");
+        assert.equal(s2.hook.phase, "idle");
+
+        if (process.platform === "win32") {
+          child1.kill();
+        } else {
+          await stopChild(child1);
+        }
+        if (child1.exitCode === null) {
+          await new Promise((r) => child1.once("exit", r));
+        }
+        const aliveAfterKill1 = readRegisteredServers({
+          serverInfoPath: join(runtimeDir, "server.json"),
+          serversDir,
+          pruneDead: true,
+        });
+        assert.equal(aliveAfterKill1.some((s) => s.lsAddress === "127.0.0.1:41111"), false);
+        assert.equal(aliveAfterKill1.some((s) => s.lsAddress === "127.0.0.1:42222"), true);
+        assert.equal(readdirSync(serversDir).length, 1);
+      } finally {
+        for (const c of [child1, child2]) {
+          if (process.platform === "win32") {
+            try {
+              c.kill();
+            } catch {}
+          } else {
+            await stopChild(c);
+          }
         }
       }
     });

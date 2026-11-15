@@ -79,6 +79,18 @@ function Stop-VerifiedSidecar {
   }
 }
 
+function Stop-AllVerifiedSidecars {
+  param([string]$RuntimeDir)
+  $srvFile = Join-Path $RuntimeDir 'server.json'
+  Stop-VerifiedSidecar -ServerJsonPath $srvFile
+  $serversDir = Join-Path $RuntimeDir 'servers'
+  if (Test-Path $serversDir) {
+    Get-ChildItem -Path $serversDir -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+      Stop-VerifiedSidecar -ServerJsonPath $_.FullName
+    }
+  }
+}
+
 function Clear-ReadOnlyAttributes {
   param([string]$TargetPath)
   Get-ChildItem -Path $TargetPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
@@ -97,12 +109,12 @@ function Uninstall-PluginDir {
     Set-Location (Split-Path -Parent $DestDir)
   }
 
-  $srvFile = Join-Path $DestDir '.runtime\server.json'
+  $rtRoot = Join-Path $DestDir '.runtime'
   $sidecarManifest = Join-Path $DestDir 'sidecars\status-monitor\sidecar.json'
   if (Test-Path $sidecarManifest) {
     Remove-Item -Path $sidecarManifest -Force -ErrorAction SilentlyContinue
   }
-  Stop-VerifiedSidecar -ServerJsonPath $srvFile
+  Stop-AllVerifiedSidecars -RuntimeDir $rtRoot
 
   $SavedConfig = $null
   $CfgFile = Join-Path $DestDir '.runtime\config.json'
@@ -119,7 +131,7 @@ function Uninstall-PluginDir {
       break
     } catch {
       if ($attempt -eq 10) { throw }
-      Stop-VerifiedSidecar -ServerJsonPath $srvFile
+      Stop-AllVerifiedSidecars -RuntimeDir $rtRoot
       Start-Sleep -Milliseconds 200
     }
   }

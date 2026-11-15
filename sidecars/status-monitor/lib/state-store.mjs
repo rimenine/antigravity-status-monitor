@@ -8,8 +8,10 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
+import { dirname, join } from "node:path";
 import { BRAIN_DIRS, FALLBACK_HOOK_PATH } from "./config.mjs";
 import { resolveEventText } from "./i18n.mjs";
+import { doesFallbackRecordMatchScope } from "./runtime-paths.mjs";
 import { collectTokenStats, resolveTranscriptLogPath } from "./tokens.mjs";
 import { computeVerdict } from "./verdict.mjs";
 
@@ -160,7 +162,15 @@ function readTailLines(filePath, stat, initialBytes = 32768, maxBytes = 16 * 102
 export function createStateStore({
   brainDirs = BRAIN_DIRS,
   fallbackHookPath = FALLBACK_HOOK_PATH,
+  fallbackHooksDir = undefined,
+  lsAddress = "",
 } = {}) {
+  const resolvedFallbackHooksDir =
+    fallbackHooksDir !== undefined
+      ? fallbackHooksDir
+      : fallbackHookPath
+        ? join(dirname(fallbackHookPath), "hooks")
+        : null;
   const conversations = new Map();
   const loggedToolSteps = new Set();
   const events = [];
@@ -548,34 +558,54 @@ export function createStateStore({
     }
   }
 
-  function loadFallbackHookIfNewer() {
-    try {
-      if (!existsSync(fallbackHookPath)) return;
-      const record = JSON.parse(readFileSync(fallbackHookPath, "utf8"));
-      const convId = record?.payload?.conversationId || "default";
-      const conv = getOrCreateConv(convId);
-      if (record?.receivedAt && (!conv.hook.lastEventAt || record.receivedAt > conv.hook.lastEventAt)) {
-        applyHookEvent(record, false);
-      }
-    } catch {
-    }
-  }
-
-  function clearFallbackHook(upToTs = Infinity) {
-    try {
-      if (!fallbackHookPath || !existsSync(fallbackHookPath)) return;
-      let shouldDelete = true;
+  function listFallbackFiles() {
+    const files = [];
+    if (resolvedFallbackHooksDir && existsSync(resolvedFallbackHooksDir)) {
       try {
-        const existing = JSON.parse(readFileSync(fallbackHookPath, "utf8"));
-        if (existing?.receivedAt && Number.isFinite(upToTs) && existing.receivedAt > upToTs) {
-          shouldDelete = false;
+        for (const name of readdirSync(resolvedFallbackHooksDir).sort()) {
+          if (name.endsWith(".json")) {
+            files.push(join(resolvedFallbackHooksDir, name));
+          }
         }
       } catch {
       }
-      if (shouldDelete) {
-        unlinkSync(fallbackHookPath);
+    }
+    if (fallbackHookPath && existsSync(fallbackHookPath)) {
+      files.push(fallbackHookPath);
+    }
+    return files;
+  }
+
+  function loadFallbackHookIfNewer() {
+    for (const filePath of listFallbackFiles()) {
+      try {
+        const record = JSON.parse(readFileSync(filePath, "utf8"));
+        if (!doesFallbackRecordMatchScope(record, { lsAddress })) continue;
+        const convId = record?.payload?.conversationId || "default";
+        const conv = getOrCreateConv(convId);
+        if (record?.receivedAt && (!conv.hook.lastEventAt || record.receivedAt > conv.hook.lastEventAt)) {
+          applyHookEvent(record, false);
+        }
+      } catch {
       }
-    } catch {
+    }
+  }
+
+  function clearFallbackHook(upToTs = Infinity, { conversationId = null, lsAddress: scopeLs = null } = {}) {
+    const targetLs = scopeLs ?? (lsAddress || null);
+    for (const filePath of listFallbackFiles()) {
+      try {
+        let shouldDelete = false;
+        const existing = JSON.parse(readFileSync(filePath, "utf8"));
+        if (doesFallbackRecordMatchScope(existing, { conversationId, lsAddress: targetLs })) {
+          shouldDelete =
+            !existing?.receivedAt || !Number.isFinite(upToTs) || existing.receivedAt <= upToTs;
+        }
+        if (shouldDelete) {
+          unlinkSync(filePath);
+        }
+      } catch {
+      }
     }
   }
 

@@ -99,6 +99,18 @@ function Stop-VerifiedSidecar {
   }
 }
 
+function Stop-AllVerifiedSidecars {
+  param([string]$RuntimeDir)
+  $srvFile = Join-Path $RuntimeDir 'server.json'
+  Stop-VerifiedSidecar -ServerJsonPath $srvFile
+  $serversDir = Join-Path $RuntimeDir 'servers'
+  if (Test-Path $serversDir) {
+    Get-ChildItem -Path $serversDir -Filter '*.json' -File -ErrorAction SilentlyContinue | ForEach-Object {
+      Stop-VerifiedSidecar -ServerJsonPath $_.FullName
+    }
+  }
+}
+
 function Remove-DirectoryWithRetry {
   param([string]$TargetPath, [int]$MaxAttempts = 10, [int]$DelayMs = 200)
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
@@ -116,8 +128,8 @@ function Remove-DirectoryWithRetry {
 if ($SourceDir -ieq $DestDir) {
   Write-Host "[INFO] Source directory is already installed at $DestDir; skipping copy." -ForegroundColor Cyan
 } else {
-  $srvFile = Join-Path $DestDir '.runtime\server.json'
-  Stop-VerifiedSidecar -ServerJsonPath $srvFile
+  $rtRoot = Join-Path $DestDir '.runtime'
+  Stop-AllVerifiedSidecars -RuntimeDir $rtRoot
 
   if (Test-Path (Join-Path $DestDir '.runtime\config.json')) {
     Write-Host '[OK] Existing .runtime configuration detected and will be preserved.' -ForegroundColor Green

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -9,13 +9,20 @@ import { packageRelease } from "../scripts/package-release.mjs";
 import { createSdkBridge } from "../sidecars/status-monitor/lib/sdk-bridge.mjs";
 import { PLUGIN_ROOT, withTempDir } from "./helpers.mjs";
 
-function runHookReporter({ pluginRoot, eventName, stdinPayload }) {
+function runHookReporter({ pluginRoot, eventName, stdinPayload, env = {} }) {
   return new Promise((resolve, reject) => {
+    const childEnv = {
+      ...process.env,
+      PLUGIN_ROOT: pluginRoot,
+      ANTIGRAVITY_CONVERSATION_ID: "",
+      ANTIGRAVITY_LS_ADDRESS: "",
+      ...env,
+    };
     const child = spawn(
       process.execPath,
       [join(PLUGIN_ROOT, "hooks/hook-reporter.mjs"), eventName],
       {
-        env: { ...process.env, PLUGIN_ROOT: pluginRoot },
+        env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
@@ -85,7 +92,7 @@ describe("hooks/hook-reporter.mjs（事件上报与降级写入）", () => {
     });
   });
 
-  it("Sidecar 不可达时静默降级写入 .runtime/hook-state.json", async () => {
+  it("Sidecar 不可达时按作用域静默降级写入 .runtime/hooks/<scope>.json", async () => {
     await withTempDir(async (dir) => {
       const res = await runHookReporter({
         pluginRoot: dir,
@@ -94,17 +101,111 @@ describe("hooks/hook-reporter.mjs（事件上报与降级写入）", () => {
           conversationId: "conv-fallback",
           terminationReason: "DONE",
         },
+        env: { ASM_RUNTIME_DIR: join(dir, ".runtime"), ANTIGRAVITY_LS_ADDRESS: "" },
       });
 
       assert.equal(res.code, 0, res.stderr);
       assert.equal(res.stdout, "{}\n");
 
-      const fallbackFile = join(dir, ".runtime", "hook-state.json");
+      const fallbackFile = join(dir, ".runtime", "hooks", "conv-conv-fallback.json");
       assert.equal(existsSync(fallbackFile), true);
+      assert.equal(existsSync(join(dir, ".runtime", "hook-state.json")), false);
       const saved = JSON.parse(readFileSync(fallbackFile, "utf8"));
       assert.equal(saved.eventName, "Stop");
       assert.equal(saved.payload.conversationId, "conv-fallback");
       assert.equal(saved.payload.terminationReason, "DONE");
+    });
+  });
+
+  it("多窗口 .runtime/servers 精准路由 Hook 且不误删其他窗口的离线状态文件", async () => {
+    await withTempDir(async (dir) => {
+      const received1 = [];
+      const received2 = [];
+      const mkMockServer = (bucket) =>
+        http.createServer((req, res) => {
+          let body = "";
+          req.on("data", (c) => (body += c));
+          req.on("end", () => {
+            bucket.push({ token: req.headers["x-hook-token"], body: JSON.parse(body) });
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end('{"ok":true}');
+          });
+        });
+
+      const srv1 = mkMockServer(received1);
+      const srv2 = mkMockServer(received2);
+      await new Promise((r) => srv1.listen(0, "127.0.0.1", r));
+      await new Promise((r) => srv2.listen(0, "127.0.0.1", r));
+      const port1 = srv1.address().port;
+      const port2 = srv2.address().port;
+
+      const rtDir = join(dir, ".runtime");
+      const serversDir = join(rtDir, "servers");
+      const hooksDir = join(rtDir, "hooks");
+      mkdirSync(serversDir, { recursive: true });
+      mkdirSync(hooksDir, { recursive: true });
+
+      writeFileSync(
+        join(serversDir, `sidecar-${process.pid}-${port1}.json`),
+        JSON.stringify({ port: port1, pid: process.pid, startedAt: 1000, hookToken: "tok-1", lsAddress: "127.0.0.1:10001" }),
+      );
+      writeFileSync(
+        join(serversDir, `sidecar-${process.pid}-${port2}.json`),
+        JSON.stringify({ port: port2, pid: process.pid, startedAt: 2000, hookToken: "tok-2", lsAddress: "127.0.0.1:10002" }),
+      );
+      // 模拟 legacy server.json 已被窗口 2 覆盖
+      writeFileSync(
+        join(rtDir, "server.json"),
+        JSON.stringify({ port: port2, pid: process.pid, startedAt: 2000, hookToken: "tok-2", lsAddress: "127.0.0.1:10002" }),
+      );
+
+      const win1HookFile = join(hooksDir, "conv-conv-win1.json");
+      const win2HookFile = join(hooksDir, "conv-conv-win2.json");
+      writeFileSync(
+        win1HookFile,
+        JSON.stringify({ eventName: "PreInvocation", receivedAt: 900, lsAddress: "127.0.0.1:10001", payload: { conversationId: "conv-win1" } }),
+      );
+      writeFileSync(
+        win2HookFile,
+        JSON.stringify({ eventName: "PreInvocation", receivedAt: 950, lsAddress: "127.0.0.1:10002", payload: { conversationId: "conv-win2" } }),
+      );
+
+      try {
+        const res1 = await runHookReporter({
+          pluginRoot: dir,
+          eventName: "PreInvocation",
+          stdinPayload: { conversationId: "conv-win1", invocationNum: 1 },
+          env: { ASM_RUNTIME_DIR: rtDir, ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:10001" },
+        });
+        assert.equal(res1.code, 0, res1.stderr);
+        assert.equal(received1.length, 1);
+        assert.equal(received1[0].token, "tok-1");
+        assert.equal(received1[0].body.lsAddress, "127.0.0.1:10001");
+        assert.equal(received2.length, 0);
+        assert.equal(existsSync(win1HookFile), false);
+        assert.equal(existsSync(win2HookFile), true);
+      } finally {
+        srv1.close();
+        srv2.close();
+      }
+
+      // 两窗口均离线且仅有 lsAddress 时各自写独立文件互不覆盖
+      const off1 = await runHookReporter({
+        pluginRoot: dir,
+        eventName: "PreInvocation",
+        stdinPayload: {},
+        env: { ASM_RUNTIME_DIR: rtDir, ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:30001" },
+      });
+      const off2 = await runHookReporter({
+        pluginRoot: dir,
+        eventName: "Stop",
+        stdinPayload: { terminationReason: "DONE" },
+        env: { ASM_RUNTIME_DIR: rtDir, ANTIGRAVITY_LS_ADDRESS: "127.0.0.1:30002" },
+      });
+      assert.equal(off1.code, 0);
+      assert.equal(off2.code, 0);
+      assert.equal(existsSync(join(hooksDir, "ls-127.0.0.1_30001.json")), true);
+      assert.equal(existsSync(join(hooksDir, "ls-127.0.0.1_30002.json")), true);
     });
   });
 });
@@ -196,21 +297,42 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       const destDir = join(sandbox, "agent-status-monitor");
       const sidecarDir = join(destDir, "sidecars", "status-monitor");
       const srvPath = join(destDir, ".runtime", "server.json");
+      const serversDir = join(destDir, ".runtime", "servers");
 
-      const childEnv = { ...process.env, ANTIGRAVITY_SIDECAR_WEB_PORT: "0", ANTIGRAVITY_LS_ADDRESS: "" };
-      delete childEnv.ASM_RUNTIME_DIR;
-      const sidecarProc = spawn(process.execPath, ["server.mjs"], {
-        cwd: sidecarDir,
-        env: childEnv,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
+      const spawnSidecar = (lsAddr) => {
+        const childEnv = {
+          ...process.env,
+          ANTIGRAVITY_SIDECAR_WEB_PORT: "0",
+          ANTIGRAVITY_LS_ADDRESS: lsAddr,
+          ANTIGRAVITY_CONVERSATION_ID: "",
+        };
+        delete childEnv.ASM_RUNTIME_DIR;
+        return spawn(process.execPath, ["server.mjs"], {
+          cwd: sidecarDir,
+          env: childEnv,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+      };
+
+      const sidecarProc1 = spawnSidecar("127.0.0.1:45111");
+      const sidecarProc2 = spawnSidecar("127.0.0.1:45222");
 
       try {
         const deadline = Date.now() + 8000;
-        while (!existsSync(srvPath) && Date.now() < deadline) {
+        while (
+          (!existsSync(srvPath) ||
+            !existsSync(serversDir) ||
+            readdirSync(serversDir).filter((f) => f.endsWith(".json")).length < 2) &&
+          Date.now() < deadline
+        ) {
           await new Promise((r) => setTimeout(r, 80));
         }
         assert.ok(existsSync(srvPath), "测试 Sidecar 未写出 .runtime/server.json");
+        assert.equal(
+          readdirSync(serversDir).filter((f) => f.endsWith(".json")).length,
+          2,
+          "测试多窗口 Sidecar 未写出两份 .runtime/servers/*.json",
+        );
 
         // 从外部目录启动，避免复制后从源目录读 uninstall 脚本导致与真实用户路径不一致
         const uninstArgs = isWin
@@ -219,12 +341,15 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         const uninstRes = await runCommand(isWin ? "powershell" : "sh", uninstArgs, sandbox);
 
         assert.equal(uninstRes.code, 0, uninstRes.stderr || uninstRes.stdout);
-        assert.match(uninstRes.stdout, /Stopping running Sidecar process/);
+        const stopMatches = uninstRes.stdout.match(/Stopping running Sidecar process/g) || [];
+        assert.ok(stopMatches.length >= 2, `Expected >=2 sidecars stopped, stdout: ${uninstRes.stdout}`);
         assert.equal(existsSync(destDir), false);
       } finally {
-        try {
-          sidecarProc.kill("SIGKILL");
-        } catch {
+        for (const p of [sidecarProc1, sidecarProc2]) {
+          try {
+            p.kill("SIGKILL");
+          } catch {
+          }
         }
       }
     });
@@ -305,6 +430,10 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "plugin.json")), true);
       assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "install.sh")), true);
       assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "install.ps1")), true);
+      assert.equal(
+        existsSync(join(tarExtract, "agent-status-monitor", "sidecars", "status-monitor", "lib", "runtime-paths.mjs")),
+        true,
+      );
       assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "tests")), false);
       assert.equal(existsSync(join(tarExtract, "agent-status-monitor", ".runtime")), false);
 

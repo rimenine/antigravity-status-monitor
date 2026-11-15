@@ -9,6 +9,8 @@ const SIDECAR_DIR = resolve(__dirname, "..");
 
 export const PLUGIN_ROOT = resolve(SIDECAR_DIR, "../..");
 export const RUNTIME_DIR = process.env.ASM_RUNTIME_DIR || join(PLUGIN_ROOT, ".runtime");
+export const SERVERS_DIR = join(RUNTIME_DIR, "servers");
+export const FALLBACK_HOOKS_DIR = join(RUNTIME_DIR, "hooks");
 export const SERVER_INFO_PATH = join(RUNTIME_DIR, "server.json");
 export const FALLBACK_HOOK_PATH = join(RUNTIME_DIR, "hook-state.json");
 export const CONFIG_PATH = join(RUNTIME_DIR, "config.json");

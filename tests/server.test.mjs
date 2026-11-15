@@ -562,4 +562,59 @@ describe("server HTTP 端到端集成测试", () => {
       }
     });
   });
+
+  it("多窗口 Sidecar 共用 .runtime 时独立写 .runtime/servers/*.json 且关闭时优雅恢复 server.json", async () => {
+    await withTempDir(async (dir) => {
+      const rtDir = join(dir, ".runtime");
+      const serverInfoPath = join(rtDir, "server.json");
+      const serversDir = join(rtDir, "servers");
+      const mkOpts = (lsAddress, uiToken, hookToken) => ({
+        configPath: join(rtDir, "config.json"),
+        serverInfoPath,
+        serversDir,
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(rtDir, "hook-state.json"),
+        uiToken,
+        hookToken,
+        lsAddress,
+        sdkBridgeImpl: {
+          config: { conversationId: null },
+          getPreloadJs: () => "",
+          isSdkReady: () => false,
+          handleSidecarRoute: async () => ({ status: 404, data: {} }),
+        },
+        disableSchedulers: true,
+        writeServerInfo: true,
+      });
+
+      const app1 = await createStatusServer(mkOpts("127.0.0.1:1111", "ui-1", "hk-1"));
+      const port1 = await app1.listen(0, "127.0.0.1");
+      await new Promise((r) => setTimeout(r, 15));
+      const app2 = await createStatusServer(mkOpts("127.0.0.1:2222", "ui-2", "hk-2"));
+      const port2 = await app2.listen(0, "127.0.0.1");
+
+      const inst1Path = join(serversDir, `sidecar-${process.pid}-${port1}.json`);
+      const inst2Path = join(serversDir, `sidecar-${process.pid}-${port2}.json`);
+
+      try {
+        assert.equal(existsSync(inst1Path), true);
+        assert.equal(existsSync(inst2Path), true);
+        assert.equal(JSON.parse(readFileSync(inst1Path, "utf8")).lsAddress, "127.0.0.1:1111");
+        assert.equal(JSON.parse(readFileSync(inst2Path, "utf8")).lsAddress, "127.0.0.1:2222");
+        assert.equal(JSON.parse(readFileSync(serverInfoPath, "utf8")).port, port2);
+
+        await app2.stop();
+        assert.equal(existsSync(inst2Path), false);
+        assert.equal(existsSync(inst1Path), true);
+        const restoredLegacy = JSON.parse(readFileSync(serverInfoPath, "utf8"));
+        assert.equal(restoredLegacy.port, port1);
+        assert.equal(restoredLegacy.lsAddress, "127.0.0.1:1111");
+      } finally {
+        await app2.stop();
+        await app1.stop();
+      }
+      assert.equal(existsSync(inst1Path), false);
+      assert.equal(existsSync(serverInfoPath), false);
+    });
+  });
 });

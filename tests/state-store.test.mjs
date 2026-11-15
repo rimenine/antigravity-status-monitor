@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createStateStore } from "../sidecars/status-monitor/lib/state-store.mjs";
@@ -418,6 +418,50 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       utimesSync(subPath, futureTime, futureTime);
       store.scanTranscript(null, false);
       assert.equal(store.resolveActiveConversation(null).hook.conversationId, "conv-main");
+    });
+  });
+
+  it("多窗口 .runtime/hooks 作用域隔离：仅加载与清理匹配 lsAddress / conversationId 的离线文件", async () => {
+    await withTempDir(async (dir) => {
+      const brainDir = join(dir, "brain");
+      const hooksDir = join(dir, "hooks");
+      mkdirSync(hooksDir, { recursive: true });
+      const now = Date.now();
+      const fileA = join(hooksDir, "ls-win-a.json");
+      const fileB = join(hooksDir, "ls-win-b.json");
+
+      writeFileSync(
+        fileA,
+        JSON.stringify({
+          eventName: "PreInvocation",
+          receivedAt: now,
+          lsAddress: "127.0.0.1:1111",
+          payload: { conversationId: "conv-win-a" },
+        }),
+      );
+      writeFileSync(
+        fileB,
+        JSON.stringify({
+          eventName: "PreInvocation",
+          receivedAt: now,
+          lsAddress: "127.0.0.1:2222",
+          payload: { conversationId: "conv-win-b" },
+        }),
+      );
+
+      const storeA = createStateStore({
+        brainDirs: [brainDir],
+        fallbackHookPath: join(dir, "hook-state.json"),
+        fallbackHooksDir: hooksDir,
+        lsAddress: "127.0.0.1:1111",
+      });
+      storeA.loadFallbackHookIfNewer();
+      assert.equal(storeA.resolveActiveConversation("conv-win-a").hook.phase, "waiting_llm");
+      assert.equal(storeA.resolveActiveConversation("conv-win-b").hook.lastEvent, null);
+
+      storeA.clearFallbackHook(now + 100, { conversationId: "conv-win-a", lsAddress: "127.0.0.1:1111" });
+      assert.equal(existsSync(fileA), false);
+      assert.equal(existsSync(fileB), true);
     });
   });
 });

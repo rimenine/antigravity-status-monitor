@@ -97,6 +97,17 @@ stop_verified_sidecar() {
   fi
 }
 
+stop_all_verified_sidecars() {
+  RT_DIR="$1"
+  stop_verified_sidecar "${RT_DIR}/server.json"
+  if [ -d "${RT_DIR}/servers" ]; then
+    for INST_FILE in "${RT_DIR}/servers/"*.json; do
+      [ -f "${INST_FILE}" ] || continue
+      stop_verified_sidecar "${INST_FILE}"
+    done
+  fi
+}
+
 uninstall_plugin_dir() {
   TARGET_ID="$1"
   TARGET_DIR="${PLUGINS_ROOT}/${TARGET_ID}"
@@ -109,7 +120,7 @@ uninstall_plugin_dir() {
   esac
 
   rm -f "${TARGET_DIR}/sidecars/status-monitor/sidecar.json" 2>/dev/null || true
-  stop_verified_sidecar "${TARGET_DIR}/.runtime/server.json"
+  stop_all_verified_sidecars "${TARGET_DIR}/.runtime"
 
   BACKUP_CFG=""
   CFG_FILE="${TARGET_DIR}/.runtime/config.json"

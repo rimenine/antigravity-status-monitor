@@ -87,6 +87,17 @@ stop_verified_sidecar() {
   fi
 }
 
+stop_all_verified_sidecars() {
+  RT_DIR="$1"
+  stop_verified_sidecar "${RT_DIR}/server.json"
+  if [ -d "${RT_DIR}/servers" ]; then
+    for INST_FILE in "${RT_DIR}/servers/"*.json; do
+      [ -f "${INST_FILE}" ] || continue
+      stop_verified_sidecar "${INST_FILE}"
+    done
+  fi
+}
+
 echo "=== Antigravity Status Monitor Installer ==="
 
 mkdir -p "${PLUGINS_ROOT}"
@@ -108,7 +119,7 @@ fi
 if [ "${SCRIPT_DIR}" = "${DEST_DIR}" ]; then
   echo "[INFO] Source is already at ${DEST_DIR}; skipping copy."
 else
-  stop_verified_sidecar "${DEST_DIR}/.runtime/server.json"
+  stop_all_verified_sidecars "${DEST_DIR}/.runtime"
   if [ -f "${DEST_DIR}/.runtime/config.json" ]; then
     echo "[OK] Existing .runtime configuration will be preserved."
   fi
