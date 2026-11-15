@@ -313,10 +313,14 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       const sidecarDir = join(destDir, "sidecars", "status-monitor");
       const srvPath = join(destDir, ".runtime", "server.json");
       const serversDir = join(destDir, ".runtime", "servers");
+      const isolatedAppData = join(sandbox, "appdata");
+      mkdirSync(join(isolatedAppData, "brain"), { recursive: true });
 
       const spawnSidecar = (lsAddr) => {
         const childEnv = {
           ...process.env,
+          ANTIGRAVITY_APP_DATA_DIR: isolatedAppData,
+          ASM_DISABLE_NOTIFICATIONS: "1",
           ANTIGRAVITY_SIDECAR_WEB_PORT: "0",
           ANTIGRAVITY_LS_ADDRESS: lsAddr,
           ANTIGRAVITY_CONVERSATION_ID: "",

@@ -205,6 +205,7 @@ describe("真实系统命令与子进程集成测试", () => {
           ...process.env,
           ASM_RUNTIME_DIR: runtimeDir,
           ANTIGRAVITY_APP_DATA_DIR: appDataDir,
+          ASM_DISABLE_NOTIFICATIONS: "1",
           ANTIGRAVITY_SIDECAR_UI_TOKEN: "ci-ui-token",
           ANTIGRAVITY_LS_ADDRESS: "",
         },
@@ -300,6 +301,7 @@ describe("真实系统命令与子进程集成测试", () => {
         ...process.env,
         ASM_RUNTIME_DIR: runtimeDir,
         ANTIGRAVITY_APP_DATA_DIR: appDataDir,
+        ASM_DISABLE_NOTIFICATIONS: "1",
         ANTIGRAVITY_LS_ADDRESS: "",
       };
       delete childEnv.ANTIGRAVITY_SIDECAR_UI_TOKEN;
@@ -358,6 +360,7 @@ describe("真实系统命令与子进程集成测试", () => {
             ...process.env,
             ASM_RUNTIME_DIR: runtimeDir,
             ANTIGRAVITY_APP_DATA_DIR: appDataDir,
+            ASM_DISABLE_NOTIFICATIONS: "1",
             ANTIGRAVITY_CONVERSATION_ID: "",
             ANTIGRAVITY_LS_ADDRESS: lsAddress,
             ANTIGRAVITY_SIDECAR_UI_TOKEN: uiToken,

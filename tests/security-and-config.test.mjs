@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { createAlertLogger } from "../sidecars/status-monitor/lib/alert-logger.mjs";
 import {
   applyConfigPatch,
   DEFAULT_CONFIG,
@@ -9,8 +11,12 @@ import {
   detectDefaultLang,
   loadConfig,
   parseLocaleLang,
+  resolveAlertLogPath,
+  resolveBrainDirs,
   sanitizeConfigForClient,
 } from "../sidecars/status-monitor/lib/config.mjs";
+import { getNotificationText } from "../sidecars/status-monitor/lib/i18n.mjs";
+import { sendDesktopNotification } from "../sidecars/status-monitor/lib/notify.mjs";
 import {
   createSecurityGuard,
   isAllowedHost,
@@ -311,6 +317,54 @@ describe("config（配置加载、边界限制与旧探测地址自动迁移）"
         if (prevAsmLang === undefined) delete process.env.ASM_DEFAULT_LANG;
         else process.env.ASM_DEFAULT_LANG = prevAsmLang;
       }
+    });
+  });
+
+  it("resolveBrainDirs 环境变量隔离、LS_DOWN 通知文案分离与 alert-logger 有界滚动", async () => {
+    await withTempDir(async (dir) => {
+      const customAppData = join(dir, "isolated-app");
+      assert.deepEqual(
+        resolveBrainDirs({ env: { ANTIGRAVITY_APP_DATA_DIR: customAppData }, home: dir }),
+        [join(customAppData, "brain")],
+      );
+
+      const fallbackDirs = resolveBrainDirs({ env: {}, home: dir });
+      assert.equal(fallbackDirs.length, 3);
+      assert.ok(fallbackDirs.includes(join(dir, ".gemini", "antigravity", "brain")));
+
+      assert.equal(resolveAlertLogPath(join(dir, ".runtime", "config.json")), join(dir, ".runtime", "alerts.log"));
+
+      // 兼容旧 boolean 参数与新对象参数，并严格区分 LS_DOWN 与 VPN 断网文案
+      assert.match(getNotificationText(false, "zh").title, /VPN/);
+      assert.match(getNotificationText(true, "en").title, /Preview/);
+      const lsZh = getNotificationText({ simulated: false, messageKey: "LS_DOWN" }, "zh");
+      assert.match(lsZh.title, /Language Server/);
+      assert.equal(lsZh.title.includes("VPN"), false);
+      const lsEn = getNotificationText({ simulated: false, messageKey: "LS_DOWN" }, "en");
+      assert.match(lsEn.title, /Language Server Unreachable/);
+
+      // ASM_DISABLE_NOTIFICATIONS=1 时可直接调用 sendDesktopNotification 而不弹窗/抛错
+      const prevDisable = process.env.ASM_DISABLE_NOTIFICATIONS;
+      process.env.ASM_DISABLE_NOTIFICATIONS = "1";
+      try {
+        assert.doesNotThrow(() => sendDesktopNotification("Test Title", "Test Body"));
+      } finally {
+        if (prevDisable === undefined) delete process.env.ASM_DISABLE_NOTIFICATIONS;
+        else process.env.ASM_DISABLE_NOTIFICATIONS = prevDisable;
+      }
+
+      // alert-logger 追加写入与按 maxBytes/keepLines 有界裁剪
+      const logPath = join(dir, ".runtime", "alerts.log");
+      const logger = createAlertLogger({ logPath, maxBytes: 320, keepLines: 3 });
+      for (let i = 0; i < 10; i++) {
+        logger.append({ type: "DISCONNECTED_HANG", reason: `R_${i}`, convId: `c-${i}` });
+      }
+      assert.equal(existsSync(logPath), true);
+      const recent = logger.readRecent(10);
+      assert.equal(recent.length, 3);
+      assert.equal(recent[0].reason, "R_7");
+      assert.equal(recent[2].reason, "R_9");
+      assert.ok(homedir().length > 0);
     });
   });
 });

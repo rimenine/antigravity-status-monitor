@@ -23,11 +23,12 @@ Because a single spinner hides where execution paused, the panel tracks four dir
 1. **Lifecycle Hooks + Transcript Activity Timer**
    - [hooks.json](hooks.json) registers only `PreInvocation` and `Stop` (using Antigravity's bundled `agy-node` first, falling back to `node`).
    - Whenever new output lands in `transcript.jsonl` or a Hook fires, the silence timer resets immediately so long multi-tool turns aren't flagged as stuck.
-2. **Silent Hang Detection & Host Health**
+2. **Silent Hang Detection, Differentiated Alerts & Host Health**
    - Combines how long the session has stayed silent against your stall threshold with host `Language Server` `/healthz` checks (located via `ANTIGRAVITY_LS_ADDRESS`), stuck `TCP 443 SYN_SENT` sockets, and upstream probe results. If Antigravity closes, the Sidecar exits cleanly on its own instead of sticking around as an orphan process.
-3. **Dual-Link Upstream HTTPS Probes & SSE Stream**
+   - **Cause-Specific Desktop Alerts & Bounded History**: Distinguishes **Upstream Connection Lost** (VPN/network timeout) from **Language Server Unreachable** when sending desktop notifications, and persists compact disconnect, LS-down, and recovery records to `.runtime/alerts.log` (bounded JSONL with automatic trimming) for post-hoc inspection.
+3. **Dual-Link Upstream HTTPS Probes & Isolated Polling**
    - Periodically opens fresh short-lived HTTPS `GET` probes (defaulting to `https://daily-cloudcode-pa.googleapis.com`) across direct/TUN and proxy routes (reading env vars / OS proxy settings, plus an optional manual proxy with HTTP `Basic` auth or unauthenticated SOCKS5).
-   - **Adaptive Short Polling & Conversation Switching**: Visible panels poll `/api/status` every 1s with short-lived requests and pause immediately when hidden (`visibilityState === "hidden"`), preventing Chromium's 6-connection-per-origin HTTP/1.1 limit from stalling new Sidecar tabs or action buttons; includes an inline selector to switch between the pinned tab conversation, **Auto (Active)**, or any recent chat. `/api/events` SSE remains available on the backend for external consumers.
+   - **Adaptive Short Polling & Window-Bound Isolation**: Visible panels poll `/api/status` every 1s with short-lived requests and pause immediately when hidden (`visibilityState === "hidden"`), preventing Chromium's 6-connection-per-origin HTTP/1.1 limit from stalling new Sidecar tabs or action buttons. Each panel stays strictly bound to its own host window's conversation (following only when the user switches windows or conversations, while isolating events and LLM heartbeat timers across parallel sessions). `/api/events` SSE remains available on the backend for external consumers.
 4. **Default Auth on All APIs + DNS Rebinding Guard + Strict CSP**
    - Binds strictly to `127.0.0.1` and validates the HTTP `Host` header against loopback addresses (`127.0.0.1`, `localhost`, `[::1]`) on every request to block DNS rebinding attacks;
    - **Enforces authentication on all `GET /api/*` and `POST /api/*` routes by default**: even standalone launches without `ANTIGRAVITY_SIDECAR_UI_TOKEN` automatically generate a random 48-char hex `uiToken` (printed cleanly in the startup `?token=...` URL). Rejects `Sec-Fetch-Site: cross-site`, `Origin: null`, and untrusted origins, enforces `Content-Type: application/json` on `POST`, and separates UI tokens from the Hook token (`.runtime/server.json` never stores `uiToken`);
@@ -44,6 +45,7 @@ This is a lightweight Sidecar status monitor rather than a packet-level inspecto
 * **Small runtime footprint**: Antigravity spawns a short-lived Node/agy-node hook process on `PreInvocation` and `Stop`, while the Sidecar stays resident alongside the host.
 * **Authenticated local API routes**: All `GET /api/*` (`/api/status`, `/api/events`) and `POST /api/*` routes require `X-Sidecar-Token` (or `?token=` for `EventSource`) by default alongside loopback `Host`, `Sec-Fetch-Site`, and `Origin` checks. Unauthenticated or cross-site local probes are rejected with `401`/`403`.
 * **Token math**: `total` simply adds raw `input_tokens + cache_read_tokens + output_tokens` occurrences across turns. Treat it as a rough sense of session workload and cache hit ratio rather than exact billing or quota usage. Live session stats follow the Hook-reported path; all-time stats scan `transcript.jsonl` (falling back to `transcript_full.jsonl`).
+* **Local alert log & notification suppression**: The Sidecar keeps only a bounded JSONL summary of alert/recovery transitions in `.runtime/alerts.log` (default `64 KB` / latest `120` lines) with zero external telemetry. Setting `ANTIGRAVITY_APP_DATA_DIR` strictly scopes `brain/` discovery, and automated/headless runs can set `ASM_DISABLE_NOTIFICATIONS=1` to suppress OS toast popups.
 
 ---
 
@@ -158,13 +160,14 @@ antigravity-status-monitor/
     ├── sidecar.json                # Sidecar registration manifest
     ├── server.mjs                  # Sidecar entrypoint, HTTP routing & lifecycle wiring
     ├── lib/
-    │   ├── config.mjs              # Runtime paths and config persistence
+    │   ├── config.mjs              # Runtime paths, brain isolation & config persistence
+    │   ├── alert-logger.mjs        # Bounded JSONL alert & recovery persistence log
     │   ├── runtime-paths.mjs       # Multi-window .runtime/servers & hooks scope helpers
     │   ├── http-helpers.mjs        # Security headers, static asset whitelist & JSON I/O
     │   ├── sse-hub.mjs             # SSE broadcast hub & pinned conversation tracking
     │   ├── server-registry.mjs     # Multi-instance registration & exit cleanup
-    │   ├── probe-coordinator.mjs   # Probe scheduler, LS inspection & alert dedup
-    │   ├── i18n.mjs                # Chinese/English localization strings & verdict copy
+    │   ├── probe-coordinator.mjs   # Probe scheduler, LS inspection, alert dedup & logging
+    │   ├── i18n.mjs                # Chinese/English localization strings, alerts & verdicts
     │   ├── security.mjs            # CSRF, Origin, Content-Type & dual-token verification
     │   ├── sdk-bridge.mjs          # sidecar_sdk bridge (/preload.js & AgentAPI)
     │   ├── transcript-reader.mjs   # Transcript tail-chunk reader & phase inference

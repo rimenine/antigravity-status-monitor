@@ -18,6 +18,7 @@ export function createProbeCoordinator({
   inspectLsFn = inspectLanguageServer,
   getLsEndpointsFn = getLsEndpoints,
   notifyFn = sendDesktopNotification,
+  alertLogger = null,
   disableSchedulers = false,
   onHealthDead = () => {},
   onStateChanged = () => {},
@@ -53,11 +54,19 @@ export function createProbeCoordinator({
         simBackupNotifyState = { prevVerdictCode, lastNotifiedAt };
       }
       prevVerdictCode = "DISCONNECTED_HANG";
-      if (config.notifyOnDisconnect) {
+      const notified = Boolean(config.notifyOnDisconnect);
+      if (notified) {
         lastNotifiedAt = now;
-        const note = getNotificationText(true, config.lang);
+        const note = getNotificationText({ simulated: true, messageKey: "NET_DOWN_HANG" }, config.lang);
         notifyFn(note.title, note.message);
       }
+      alertLogger?.append({
+        type: "SIMULATION_ON",
+        reason: "MANUAL_PREVIEW",
+        simulated: true,
+        notified,
+        convId: getPreferredConvId() || null,
+      });
       return;
     }
     restoreNotifyStateAfterSim();
@@ -159,6 +168,7 @@ export function createProbeCoordinator({
       envProxy: getEnvProxy(process.env, probeUrlSnapshot),
     });
     const wasDown = runtime.consecutiveFailures >= 2;
+    const activeConv = store.resolveActiveConversation(getPreferredConvId());
 
     if (result.ok) {
       runtime.consecutiveFailures = 0;
@@ -171,6 +181,11 @@ export function createProbeCoordinator({
           null,
           { key: "NET_RECOVERED", params: { latencyMs: result.latencyMs } },
         );
+        alertLogger?.append({
+          type: "NET_RECOVERED",
+          latencyMs: result.latencyMs,
+          convId: activeConv.id || null,
+        });
       }
     } else {
       runtime.consecutiveFailures += 1;
@@ -183,12 +198,16 @@ export function createProbeCoordinator({
           null,
           { key: "NET_FAILED", params: { error: result.error || "" } },
         );
+        alertLogger?.append({
+          type: "NET_FAILED",
+          error: result.error || "超时",
+          convId: activeConv.id || null,
+        });
       }
     }
 
     pushProbeSample(result);
 
-    const activeConv = store.resolveActiveConversation(getPreferredConvId());
     const verdict = computeVerdict({
       hook: activeConv.hook,
       transcript: activeConv.transcript,
@@ -201,13 +220,30 @@ export function createProbeCoordinator({
 
     if (
       verdict.code === "DISCONNECTED_HANG" &&
-      prevVerdictCode !== "DISCONNECTED_HANG" &&
-      config.notifyOnDisconnect &&
-      Date.now() - lastNotifiedAt > NOTIFY_COOLDOWN_MS
+      prevVerdictCode !== "DISCONNECTED_HANG"
     ) {
-      lastNotifiedAt = Date.now();
-      const note = getNotificationText(verdict.simulated, config.lang);
-      notifyFn(note.title, note.message);
+      const canNotify =
+        config.notifyOnDisconnect &&
+        Date.now() - lastNotifiedAt > NOTIFY_COOLDOWN_MS;
+      if (canNotify) {
+        lastNotifiedAt = Date.now();
+        const note = getNotificationText(
+          { simulated: verdict.simulated, messageKey: verdict.messageKey },
+          config.lang,
+        );
+        notifyFn(note.title, note.message);
+      }
+      alertLogger?.append({
+        type: "DISCONNECTED_HANG",
+        reason: verdict.messageKey || "UNKNOWN",
+        message: verdict.message,
+        simulated: verdict.simulated,
+        notified: Boolean(canNotify),
+        convId: activeConv.id || null,
+        error: result.ok ? "" : result.error || "",
+        lsRunning: runtime.ls?.running ?? null,
+        healthz: runtime.ls?.healthz?.reachable ?? null,
+      });
     }
     prevVerdictCode = verdict.code;
     onStateChanged({ force: true });

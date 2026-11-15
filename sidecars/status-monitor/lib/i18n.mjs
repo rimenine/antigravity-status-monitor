@@ -188,15 +188,46 @@ export function resolveEventText(ev, lang = "zh") {
   return { ...ev, title, detail };
 }
 
-export function getNotificationText(simulated, lang = "zh") {
+function normalizeNotificationInput(input) {
+  if (typeof input === "object" && input !== null) {
+    return {
+      simulated: Boolean(input.simulated),
+      messageKey: String(input.messageKey || "NET_DOWN_HANG"),
+    };
+  }
+  return {
+    simulated: Boolean(input),
+    messageKey: "NET_DOWN_HANG",
+  };
+}
+
+export function getNotificationText(input, lang = "zh") {
+  const { simulated, messageKey } = normalizeNotificationInput(input);
+  const isLsDown = !simulated && messageKey === "LS_DOWN";
+
   if (normalizeLang(lang) === "en") {
+    if (isLsDown) {
+      return {
+        title: "Antigravity: Language Server Unreachable",
+        message:
+          'Conversation appears "Working", but host Language Server or /healthz is unreachable.',
+      };
+    }
     return {
       title: simulated
         ? "Antigravity: Upstream Hang Alert (Preview)"
         : "Antigravity: Upstream Connection Lost",
       message: simulated
         ? "Preview notification for silent hang alert."
-        : "Conversation appears \"Working\", but upstream HTTPS probes failed. Check your network or proxy.",
+        : 'Conversation appears "Working", but upstream HTTPS probes failed. Check your network or proxy.',
+    };
+  }
+
+  if (isLsDown) {
+    return {
+      title: "Antigravity：Language Server 失联",
+      message:
+        "当前对话仍显示工作中，但宿主 Language Server 进程或 healthz 接口不可达，请检查客户端状态。",
     };
   }
   return {

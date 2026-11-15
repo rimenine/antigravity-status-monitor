@@ -322,6 +322,7 @@ describe("server HTTP 端到端集成测试", () => {
           fetchedEndpointPids.push(pid);
           return { cloudCode: `https://cc-${pid}.example`, apiServer: null };
         },
+        notifyFn: () => {},
         disableSchedulers: true,
         writeServerInfo: false,
       });
@@ -538,6 +539,7 @@ describe("server HTTP 端到端集成测试", () => {
             isSdkReady: () => false,
             handleSidecarRoute: async () => ({ status: 404, data: {} }),
           },
+          notifyFn: () => {},
           disableSchedulers: true,
           writeServerInfo: false,
         });
@@ -593,6 +595,7 @@ describe("server HTTP 端到端集成测试", () => {
           isSdkReady: () => false,
           handleSidecarRoute: async () => ({ status: 404, data: {} }),
         },
+        notifyFn: () => {},
         disableSchedulers: true,
         writeServerInfo: true,
       });
@@ -765,6 +768,104 @@ describe("server HTTP 端到端集成测试", () => {
         } finally {
           poolAgent.destroy();
         }
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
+  it("LS_DOWN 发送独立桌面通知而非 VPN 文案，且 alerts.log 持久化关键告警与恢复记录", async () => {
+    await withTempDir(async (dir) => {
+      const notifications = [];
+      let lsUp = false;
+      let netUp = true;
+
+      const rtDir = join(dir, ".runtime");
+      const cfgPath = join(rtDir, "config.json");
+      const alertsLogPath = join(rtDir, "alerts.log");
+
+      const app = await createStatusServer({
+        configPath: cfgPath,
+        serverInfoPath: join(rtDir, "server.json"),
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(rtDir, "hook-state.json"),
+        uiToken: "ui-tok-alerts",
+        hookToken: "hk-tok-alerts",
+        lsAddress: "",
+        sdkBridgeImpl: {
+          config: { conversationId: "conv-alerts" },
+          getPreloadJs: () => "",
+          isSdkReady: () => false,
+          handleSidecarRoute: async () => ({ status: 404, data: {} }),
+        },
+        probePathsFn: async () => ({
+          proxyConfig: null,
+          direct: netUp
+            ? { ok: true, statusCode: 404, latencyMs: 18, mode: "direct", error: null }
+            : { ok: false, statusCode: null, latencyMs: 400, mode: "direct", error: "TIMEOUT" },
+          proxy: null,
+        }),
+        inspectLsFn: async () => ({
+          running: lsUp,
+          pids: lsUp ? ["888"] : [],
+          lsPid: lsUp ? "888" : null,
+          matchedByPort: lsUp,
+          established443: lsUp ? 1 : 0,
+          synSent443: 0,
+          proxyConns: 0,
+          tunDetected: false,
+          localIps: [],
+          route: "direct",
+          healthz: { reachable: lsUp, instanceId: lsUp ? "inst-alerts" : null },
+        }),
+        notifyFn: (title, message) => notifications.push({ title, message }),
+        disableSchedulers: true,
+        writeServerInfo: false,
+      });
+
+      const port = await app.listen(0, "127.0.0.1");
+      const postHeaders = {
+        Origin: "plugin://agent-status-monitor",
+        "Content-Type": "application/json",
+        "X-Sidecar-Token": "ui-tok-alerts",
+      };
+
+      try {
+        await httpRequest(port, "POST", "/api/hook", {
+          headers: { "Content-Type": "application/json", "X-Hook-Token": "hk-tok-alerts" },
+          body: {
+            eventName: "PreInvocation",
+            receivedAt: Date.now(),
+            payload: { conversationId: "conv-alerts", invocationNum: 1 },
+          },
+        });
+
+        // 场景 1：网络正常但 LS 失联 -> 弹窗应提示 Language Server 失联而非 VPN 断开
+        await app.runLsInspection();
+        await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        assert.equal(notifications.length, 1);
+        assert.match(notifications[0].title, /Language Server/);
+        assert.equal(notifications[0].title.includes("VPN"), false);
+
+        // 场景 2：LS 恢复后发生连续 2 次断网 -> 再恢复，验证 alerts.log 完整记录
+        lsUp = true;
+        await app.runLsInspection();
+        await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        netUp = false;
+        await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        netUp = true;
+        await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+
+        assert.equal(existsSync(alertsLogPath), true);
+        const entries = readFileSync(alertsLogPath, "utf8")
+          .trim()
+          .split(/\r?\n/)
+          .map((line) => JSON.parse(line));
+        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.reason === "LS_DOWN" && e.notified === true));
+        assert.ok(entries.some((e) => e.type === "NET_FAILED" && e.error === "TIMEOUT"));
+        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.reason === "NET_DOWN_HANG"));
+        assert.ok(entries.some((e) => e.type === "NET_RECOVERED" && e.latencyMs === 18));
       } finally {
         await app.stop();
       }

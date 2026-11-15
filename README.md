@@ -26,8 +26,9 @@
 2. **双链路 HTTPS 短连接探针（直连/TUN vs 代理）**
    - 按设定周期分别走直连和代理测一次短连接可达性（默认探测 `https://daily-cloudcode-pa.googleapis.com`），支持自动读取环境变量/系统代理，也可以在设置里手动填写 HTTP `Basic` 或无认证 SOCKS5 代理，再结合宿主 `Language Server` 的 443 端口连接状态一起判断链路是否正常。
    - **自适应短连接轮询 + 窗口绑定隔离**：面板前台每 1 秒通过 `/api/status` 拉取状态（`~2ms` 用完即释放连接，切到后台自动暂停并释放连接槽位，彻底避免多个 Sidecar 标签长期占满 Chromium 6 条 HTTP/1.1 连接上限导致新面板转圈或按钮无响应），始终严格绑定当前宿主窗口所属对话（仅随用户切换窗口/对话同步切换，并过滤隔离其他并行对话的事件流与心跳耗时）；服务端仍保留 `/api/events` SSE 接口供外部按需订阅。
-3. **宿主进程追踪与自动退出**
-   - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；如果 Antigravity 已经关掉且 `/healthz` 连续连不上，Sidecar 会自动退出，不在后台留孤儿进程。
+3. **宿主进程追踪、分因告警与自动退出**
+   - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；如果 Antigravity 已经关掉且 `/healthz` 连续连不上，Sidecar 会自动退出，不在后台留孤儿进程；
+   - **分因桌面弹窗 + 本地有界故障日志**：触发桌面告警时严格区分 **VPN / 上游网络断开** 与 **Language Server 失联** 两类提示文案（避免把宿主失联误报成 VPN 断开），并将关键断网、失联与恢复事件持久化到 `.runtime/alerts.log`（有界 JSONL，自动裁剪）供事后排查。
 4. **默认全接口认证 + DNS 重绑定防护 + 严格 CSP 锁定**
    - 仅监听 `127.0.0.1`，并在 HTTP 入口校验 `Host` 头仅允许回环地址（`127.0.0.1` / `localhost` / `[::1]`），直接拦截 DNS 重绑定探测；
    - **所有 `GET /api/*` 与 `POST /api/*` 默认强制鉴权**：即使脱离宿主独立运行（未设置 `ANTIGRAVITY_SIDECAR_UI_TOKEN`），启动时也会自动生成随机 48 位 hex `uiToken`（并在控制台输出带 `?token=...` 的本机访问链接）；同时校验 `Sec-Fetch-Site`（拦截 `cross-site`）与 `Origin`（拦截 `Origin: null` 与外部域），`POST` 额外强制 `Content-Type: application/json`，Hook 上报使用独立的随机 `X-Hook-Token`（`.runtime/server.json` 不写入 `uiToken`）；
@@ -44,6 +45,7 @@
 * **Hooks 与常驻开销**：Antigravity 每次 `PreInvocation` / `Stop` 时会拉起一次短暂的轻量 Hook 进程；Sidecar 本身为常驻本地 Node 进程。
 * **本地接口访问范围**：即使仅绑定 `127.0.0.1`，全部 `GET /api/*`（含 `/api/status`、`/api/events`）与 `POST /api/*` 均默认强制校验 `X-Sidecar-Token`（或 SSE 使用的 `?token=`）、`Host` 回环白名单、`Sec-Fetch-Site` 与 `Origin`；未授权网页或未携带 Token 的本机请求会被直接拦截（`401`/`403`）。
 * **Token 统计口径**：`total` 直接累加 `input_tokens + cache_read_tokens + output_tokens` 的原始次数，用来直观感受工作量与缓存命中趋势即可，不能直接等同于官方计费或配额扣减；当前会话优先走 Hook 上报路径，全量历史统计扫描 `transcript.jsonl`（不存在时回退 `transcript_full.jsonl`）。
+* **本地告警日志与弹窗控制**：Sidecar 仅在本地 `.runtime/alerts.log` 保留有界裁剪后的关键告警/恢复摘要 JSONL（默认上限 `64 KB` / 最近 `120` 条），不上传任何外部服务；指定 `ANTIGRAVITY_APP_DATA_DIR` 时会严格隔离 `brain/` 扫描范围，无头测试或自动化脚本可通过 `ASM_DISABLE_NOTIFICATIONS=1` 静默系统桌面弹窗。
 
 ---
 
@@ -158,13 +160,14 @@ antigravity-status-monitor/
     ├── sidecar.json                # Sidecar 注册配置
     ├── server.mjs                  # Sidecar 入口、路由分发与生命周期组合
     ├── lib/
-    │   ├── config.mjs              # 运行时路径与配置持久化
+    │   ├── config.mjs              # 运行时路径、brain 隔离与配置持久化
+    │   ├── alert-logger.mjs        # 有界 JSONL 故障告警与恢复持久化日志
     │   ├── runtime-paths.mjs       # 多窗口 .runtime/servers 与 hooks 作用域工具
     │   ├── http-helpers.mjs        # 安全响应头、静态白名单与 JSON 收发
     │   ├── sse-hub.mjs             # SSE 广播 hub 与多标签页钉选会话跟踪
     │   ├── server-registry.mjs     # 多实例注册表与退出清理
-    │   ├── probe-coordinator.mjs   # 探针调度、LS 探查与桌面告警去重
-    │   ├── i18n.mjs                # 中英文双语文案、事件与通知翻译
+    │   ├── probe-coordinator.mjs   # 探针调度、LS 探查、分因告警去重与落盘
+    │   ├── i18n.mjs                # 中英文双语文案、分因通知与事件翻译
     │   ├── security.mjs            # CSRF 防护、Content-Type 与双令牌鉴权
     │   ├── sdk-bridge.mjs          # sidecar_sdk 桥接（/preload.js 与 AgentAPI）
     │   ├── transcript-reader.mjs   # Transcript 尾部读取与单文件阶段推断

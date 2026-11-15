@@ -1,12 +1,14 @@
 import http from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAlertLogger } from "./lib/alert-logger.mjs";
 import {
   applyConfigPatch,
   CONFIG_PATH,
   loadConfig,
   LS_ADDRESS,
   PUBLIC_DIR,
+  resolveAlertLogPath,
   sanitizeConfigForClient,
   SERVER_INFO_PATH,
 } from "./lib/config.mjs";
@@ -60,11 +62,15 @@ export async function createStatusServer({
   inspectLsFn = inspectLanguageServer,
   getLsEndpointsFn = getLsEndpoints,
   notifyFn = sendDesktopNotification,
+  alertLogPath = undefined,
   disableSchedulers = false,
   writeServerInfo = true,
   exitFn = (code) => process.exit(code),
 } = {}) {
   const config = loadConfig(configPath);
+  const alertLogger = createAlertLogger({
+    logPath: alertLogPath ?? resolveAlertLogPath(configPath),
+  });
   const store = createStateStore({ brainDirs, fallbackHookPath, fallbackHooksDir, lsAddress });
   const registry = createServerRegistry({ writeServerInfo, serverInfoPath, serversDir });
   const security = createSecurityGuard({ uiToken, hookToken });
@@ -114,6 +120,7 @@ export async function createStatusServer({
     inspectLsFn,
     getLsEndpointsFn,
     notifyFn,
+    alertLogger,
     disableSchedulers,
     onHealthDead: () => {
       registry.cleanup();

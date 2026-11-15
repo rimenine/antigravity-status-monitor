@@ -14,20 +14,37 @@ export const FALLBACK_HOOKS_DIR = join(RUNTIME_DIR, "hooks");
 export const SERVER_INFO_PATH = join(RUNTIME_DIR, "server.json");
 export const FALLBACK_HOOK_PATH = join(RUNTIME_DIR, "hook-state.json");
 export const CONFIG_PATH = join(RUNTIME_DIR, "config.json");
+export const ALERTS_LOG_PATH = join(RUNTIME_DIR, "alerts.log");
 export const PUBLIC_DIR = join(SIDECAR_DIR, "public");
 
 export const LS_ADDRESS = process.env.ANTIGRAVITY_LS_ADDRESS || "";
 const APP_DATA_DIR =
   process.env.ANTIGRAVITY_APP_DATA_DIR || join(homedir(), ".gemini", "antigravity");
 
-export const BRAIN_DIRS = [
-  ...new Set([
-    join(APP_DATA_DIR, "brain"),
-    join(homedir(), ".gemini", "antigravity", "brain"),
-    join(homedir(), ".gemini", "antigravity-ide", "brain"),
-    join(homedir(), ".gemini", "antigravity-cli", "brain"),
-  ]),
-];
+/**
+ * 解析会话 transcript 所在的 brain 目录列表。
+ * 显式指定 ANTIGRAVITY_APP_DATA_DIR 时严格隔离到该目录，避免测试或隔离实例扫到宿主真实会话。
+ */
+export function resolveBrainDirs({ env = process.env, home = homedir() } = {}) {
+  const explicitAppData =
+    typeof env?.ANTIGRAVITY_APP_DATA_DIR === "string" ? env.ANTIGRAVITY_APP_DATA_DIR.trim() : "";
+  if (explicitAppData) {
+    return [join(explicitAppData, "brain")];
+  }
+  return [
+    ...new Set([
+      join(home, ".gemini", "antigravity", "brain"),
+      join(home, ".gemini", "antigravity-ide", "brain"),
+      join(home, ".gemini", "antigravity-cli", "brain"),
+    ]),
+  ];
+}
+
+export function resolveAlertLogPath(configPath = CONFIG_PATH) {
+  return join(dirname(configPath), "alerts.log");
+}
+
+export const BRAIN_DIRS = resolveBrainDirs();
 
 export const DEFAULT_PROBE_URL = "https://daily-cloudcode-pa.googleapis.com";
 

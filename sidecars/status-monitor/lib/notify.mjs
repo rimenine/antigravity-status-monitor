@@ -20,6 +20,8 @@ function escapeXml(str) {
 }
 
 export function sendDesktopNotification(title, message) {
+  // 测试或无头场景可通过环境变量禁用真实系统桌面弹窗
+  if (process.env.ASM_DISABLE_NOTIFICATIONS === "1") return;
   try {
     if (process.platform === "win32") {
       const escPs = (s) => s.replace(/'/g, "''");
