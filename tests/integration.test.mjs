@@ -219,8 +219,17 @@ describe("真实系统命令与子进程集成测试", () => {
           "X-Sidecar-Token": "ci-ui-token",
         };
 
-        const statusRes = await httpRequest(port, "GET", "/api/status");
+        const unauthRes = await httpRequest(port, "GET", "/api/status");
+        assert.equal(unauthRes.status, 401);
+
+        const rebindRes = await httpRequest(port, "GET", "/api/status", {
+          headers: { Host: `evil.example:${port}`, "X-Sidecar-Token": "ci-ui-token" },
+        });
+        assert.equal(rebindRes.status, 403);
+
+        const statusRes = await httpRequest(port, "GET", "/api/status", { headers: uiHeaders });
         assert.equal(statusRes.status, 200);
+        assert.equal(statusRes.headers["content-security-policy"], "default-src 'self'; connect-src 'self'");
         const statusJson = JSON.parse(statusRes.body);
         assert.equal(statusJson.security.uiTokenEnforced, true);
 
@@ -260,11 +269,68 @@ describe("真实系统命令与子进程集成测试", () => {
         });
         assert.equal(hookRes.status, 200);
 
-        const afterRes = await httpRequest(port, "GET", "/api/status?conversationId=ci-conv-1");
+        const afterRes = await httpRequest(port, "GET", "/api/status?conversationId=ci-conv-1", {
+          headers: uiHeaders,
+        });
         assert.equal(afterRes.status, 200);
         const afterJson = JSON.parse(afterRes.body);
         assert.equal(afterJson.hook.phase, "waiting_llm");
         assert.equal(afterJson.verdict.code, "DISCONNECTED_HANG");
+      } finally {
+        if (process.platform === "win32") {
+          try {
+            child.kill();
+          } catch {}
+        } else {
+          await stopChild(child);
+        }
+      }
+    });
+  });
+
+  it("独立启动无 ANTIGRAVITY_SIDECAR_UI_TOKEN 时仍自动启用 Token 认证并在 stderr 打印访问链接", async () => {
+    await withTempDir(async (dir) => {
+      const runtimeDir = join(dir, ".runtime");
+      const appDataDir = join(dir, "appdata");
+      mkdirSync(runtimeDir, { recursive: true });
+      mkdirSync(join(appDataDir, "brain"), { recursive: true });
+
+      const childEnv = {
+        ...process.env,
+        ASM_RUNTIME_DIR: runtimeDir,
+        ANTIGRAVITY_APP_DATA_DIR: appDataDir,
+        ANTIGRAVITY_LS_ADDRESS: "",
+      };
+      delete childEnv.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+
+      let stderrOut = "";
+      const child = spawn(process.execPath, [join(PLUGIN_ROOT, "sidecars/status-monitor/server.mjs")], {
+        env: childEnv,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      child.stderr.on("data", (d) => (stderrOut += d.toString("utf8")));
+
+      try {
+        const srvInfo = await waitForFile(join(runtimeDir, "server.json"));
+        const deadline = Date.now() + 4000;
+        let standaloneToken = "";
+        while (Date.now() < deadline) {
+          const m = stderrOut.match(/http:\/\/127\.0\.0\.1:\d+\/\?token=([0-9a-f]+)/);
+          if (m) {
+            standaloneToken = m[1];
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        assert.ok(standaloneToken.length >= 32, `Expected standalone token URL in stderr, got: ${stderrOut}`);
+        assert.equal("uiToken" in srvInfo, false);
+
+        assert.equal((await httpRequest(srvInfo.port, "GET", "/api/status")).status, 401);
+        const okRes = await httpRequest(srvInfo.port, "GET", "/api/status", {
+          headers: { "X-Sidecar-Token": standaloneToken },
+        });
+        assert.equal(okRes.status, 200);
+        assert.equal(JSON.parse(okRes.body).security.uiTokenEnforced, true);
       } finally {
         if (process.platform === "win32") {
           try {

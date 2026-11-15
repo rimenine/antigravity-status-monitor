@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { packageRelease } from "../scripts/package-release.mjs";
 import { createSdkBridge } from "../sidecars/status-monitor/lib/sdk-bridge.mjs";
 import { PLUGIN_ROOT, withTempDir } from "./helpers.mjs";
 
@@ -123,9 +125,7 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.deepEqual(missing, []);
     assert.ok(jsIds.length >= 22);
     assert.match(html, /id="btnSettings"[^>]*>[\s\S]*?<svg[\s\S]*?<\/svg>/);
-    assert.match(html, /--mon-accent/);
-    assert.match(html, /--mon-ok/);
-    assert.match(html, /--mon-tool/);
+    assert.doesNotMatch(html, /\bstyle\s*=|<style\b/i);
     assert.doesNotMatch(html, /var\(--(accent|ok|tool)\)/);
     assert.ok(htmlIds.has("btnLangZh") && htmlIds.has("btnLangEn"));
     assert.match(appJs, /netRetry/);
@@ -133,11 +133,17 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.match(appJs, /updateConnectionDot/);
     assert.match(appJs, /detectBrowserLang/);
     assert.match(appJs, /navigator\.language/);
+    assert.match(appJs, /eventsParams\.set\("token", urlToken\)/);
+    assert.doesNotMatch(appJs, /\.cssText\s*=/);
 
     const stylesCss = readFileSync(
       join(PLUGIN_ROOT, "sidecars/status-monitor/public/styles.css"),
       "utf8",
     );
+    assert.match(stylesCss, /--mon-accent/);
+    assert.match(stylesCss, /--mon-ok/);
+    assert.match(stylesCss, /--mon-tool/);
+    assert.match(stylesCss, /\.theme-probe\s*\{/);
     assert.match(stylesCss, /\.setting-row\s+select[\s\S]*?max-width:\s*58%/);
     assert.match(stylesCss, /\.setting-row\s+select[\s\S]*?min-width:\s*0/);
 
@@ -271,5 +277,55 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       const res = await defaultBridge.handleSidecarRoute("/_sidecar/get-conversation-metadata", {});
       assert.equal(res.status, 503);
     }
+  });
+
+  it("package-release 可构建可解压安装的 .zip/.tar.gz 与 SHA256SUMS.txt", async () => {
+    await withTempDir(async (sandbox) => {
+      const outDir = join(sandbox, "dist");
+      const res = packageRelease({ repoRoot: PLUGIN_ROOT, outDir, tag: "v1.0.1-test" });
+
+      assert.equal(res.pluginId, "agent-status-monitor");
+      assert.ok(existsSync(join(outDir, "agent-status-monitor-v1.0.1-test.zip")));
+      assert.ok(existsSync(join(outDir, "agent-status-monitor-v1.0.1-test.tar.gz")));
+      assert.ok(existsSync(join(outDir, "agent-status-monitor.zip")));
+      assert.ok(existsSync(join(outDir, "agent-status-monitor.tar.gz")));
+
+      const sums = readFileSync(join(outDir, "SHA256SUMS.txt"), "utf8").trim().split("\n");
+      assert.equal(sums.length, 4);
+      for (const line of sums) {
+        const [expectedHash, fileName] = line.trim().split(/\s+/);
+        const actualHash = createHash("sha256").update(readFileSync(join(outDir, fileName))).digest("hex");
+        assert.equal(actualHash, expectedHash);
+      }
+
+      const tarExtract = join(sandbox, "tar-out");
+      mkdirSync(tarExtract, { recursive: true });
+      const tarRes = await runCommand("tar", ["-xzf", join(outDir, "agent-status-monitor.tar.gz"), "-C", tarExtract]);
+      assert.equal(tarRes.code, 0, tarRes.stderr);
+      assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "plugin.json")), true);
+      assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "install.sh")), true);
+      assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "install.ps1")), true);
+      assert.equal(existsSync(join(tarExtract, "agent-status-monitor", "tests")), false);
+      assert.equal(existsSync(join(tarExtract, "agent-status-monitor", ".runtime")), false);
+
+      if (process.platform !== "win32") {
+        assert.ok((statSync(join(tarExtract, "agent-status-monitor", "install.sh")).mode & 0o111) !== 0);
+        assert.ok((statSync(join(tarExtract, "agent-status-monitor", "uninstall.sh")).mode & 0o111) !== 0);
+      }
+
+      const zipExtract = join(sandbox, "zip-out");
+      mkdirSync(zipExtract, { recursive: true });
+      const zipCmd =
+        process.platform === "win32"
+          ? await runCommand("powershell", [
+              "-NoProfile",
+              "-Command",
+              `Expand-Archive -Path '${join(outDir, "agent-status-monitor.zip").replace(/'/g, "''")}' -DestinationPath '${zipExtract.replace(/'/g, "''")}' -Force`,
+            ])
+          : await runCommand("unzip", ["-q", join(outDir, "agent-status-monitor.zip"), "-d", zipExtract]);
+      assert.equal(zipCmd.code, 0, zipCmd.stderr || zipCmd.stdout);
+      assert.equal(existsSync(join(zipExtract, "agent-status-monitor", "sidecars", "status-monitor", "server.mjs")), true);
+      assert.equal(existsSync(join(zipExtract, "agent-status-monitor", "tests")), false);
+    });
   });
 });

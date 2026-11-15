@@ -7,6 +7,7 @@ node_modules/
 # Logs and temporary artifacts
 *.log
 *.tmp
+dist/
 .DS_Store
 Thumbs.db
 desktop.ini

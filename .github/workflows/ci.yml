@@ -68,6 +68,17 @@ jobs:
           sh "$SANDBOX/agent-status-monitor/uninstall.sh" "$SANDBOX"
           test ! -d "$SANDBOX/agent-status-monitor"
 
+          node scripts/package-release.mjs --out "$SANDBOX/dist"
+          unzip -q "$SANDBOX/dist/agent-status-monitor.zip" -d "$SANDBOX/unpacked-zip"
+          sh "$SANDBOX/unpacked-zip/agent-status-monitor/install.sh" "$SANDBOX/plugins-from-zip"
+          test -f "$SANDBOX/plugins-from-zip/agent-status-monitor/plugin.json"
+
+          mkdir -p "$SANDBOX/unpacked-tgz"
+          tar -xzf "$SANDBOX/dist/agent-status-monitor.tar.gz" -C "$SANDBOX/unpacked-tgz"
+          test -x "$SANDBOX/unpacked-tgz/agent-status-monitor/uninstall.sh"
+          sh "$SANDBOX/unpacked-tgz/agent-status-monitor/install.sh" "$SANDBOX/plugins-from-tgz"
+          test -f "$SANDBOX/plugins-from-tgz/agent-status-monitor/sidecars/status-monitor/server.mjs"
+
       - name: Test Windows installer & uninstaller
         if: runner.os == 'Windows'
         shell: pwsh
@@ -92,6 +103,20 @@ jobs:
             pwsh -NoProfile -ExecutionPolicy Bypass -File "$sandbox\agent-status-monitor\uninstall.ps1" -PluginsRoot $sandbox
             if ($LASTEXITCODE -ne 0) { throw 'uninstall.ps1 clean failed' }
             if (Test-Path "$sandbox\agent-status-monitor") { throw 'plugin directory not deleted' }
+
+            node scripts\package-release.mjs --out "$sandbox\dist"
+            if ($LASTEXITCODE -ne 0) { throw 'package-release.mjs failed' }
+            Expand-Archive -Path "$sandbox\dist\agent-status-monitor.zip" -DestinationPath "$sandbox\unpacked-zip" -Force
+            pwsh -NoProfile -ExecutionPolicy Bypass -File "$sandbox\unpacked-zip\agent-status-monitor\install.ps1" -PluginsRoot "$sandbox\plugins-from-zip"
+            if ($LASTEXITCODE -ne 0) { throw 'install.ps1 from release zip failed' }
+            if (-not (Test-Path "$sandbox\plugins-from-zip\agent-status-monitor\plugin.json")) { throw 'packaged plugin.json missing' }
+
+            New-Item -ItemType Directory -Force -Path "$sandbox\unpacked-tgz" | Out-Null
+            tar -xzf "$sandbox\dist\agent-status-monitor.tar.gz" -C "$sandbox\unpacked-tgz"
+            if ($LASTEXITCODE -ne 0) { throw 'tar extract failed' }
+            pwsh -NoProfile -ExecutionPolicy Bypass -File "$sandbox\unpacked-tgz\agent-status-monitor\install.ps1" -PluginsRoot "$sandbox\plugins-from-tgz"
+            if ($LASTEXITCODE -ne 0) { throw 'install.ps1 from release tgz failed' }
+            if (-not (Test-Path "$sandbox\plugins-from-tgz\agent-status-monitor\sidecars\status-monitor\server.mjs")) { throw 'packaged server.mjs missing' }
           } finally {
             Remove-Item -Path $sandbox -Recurse -Force -ErrorAction SilentlyContinue
           }

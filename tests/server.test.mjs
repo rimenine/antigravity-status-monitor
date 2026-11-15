@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -116,14 +116,44 @@ describe("server HTTP 端到端集成测试", () => {
         const htmlRes = await httpRequest(port, "GET", "/");
         assert.equal(htmlRes.status, 200);
         assert.equal(htmlRes.headers["x-content-type-options"], "nosniff");
+        assert.equal(htmlRes.headers["content-security-policy"], "default-src 'self'; connect-src 'self'");
         assert.match(htmlRes.body, /id="btnSim"/);
+
+        const rebindHtml = await httpRequest(port, "GET", "/", {
+          headers: { Host: `evil.example:${port}` },
+        });
+        assert.equal(rebindHtml.status, 403);
 
         const jsRes = await httpRequest(port, "GET", "/app.js");
         assert.equal(jsRes.status, 200);
+        assert.equal(jsRes.headers["content-security-policy"], "default-src 'self'; connect-src 'self'");
         assert.match(jsRes.body, /new EventSource/);
 
-        const statusRes = await httpRequest(port, "GET", "/api/status?conversationId=conv-e2e");
+        const unauthStatus = await httpRequest(port, "GET", "/api/status?conversationId=unauth-conv");
+        assert.equal(unauthStatus.status, 401);
+
+        const unauthEvents = await httpRequest(port, "GET", "/api/events");
+        assert.equal(unauthEvents.status, 401);
+
+        const crossSiteStatus = await httpRequest(port, "GET", "/api/status?conversationId=conv-e2e", {
+          headers: { "Sec-Fetch-Site": "cross-site", "X-Sidecar-Token": "ui-secret-42" },
+        });
+        assert.equal(crossSiteStatus.status, 403);
+
+        const rebindStatus = await httpRequest(port, "GET", "/api/status", {
+          headers: { Host: `attacker.example:${port}`, "X-Sidecar-Token": "ui-secret-42" },
+        });
+        assert.equal(rebindStatus.status, 403);
+
+        const srvDisk = JSON.parse(readFileSync(srvPath, "utf8"));
+        assert.equal(srvDisk.hookToken, "hook-secret-99");
+        assert.equal("uiToken" in srvDisk, false);
+
+        const statusRes = await httpRequest(port, "GET", "/api/status?conversationId=conv-e2e", {
+          headers: { "X-Sidecar-Token": "ui-secret-42" },
+        });
         assert.equal(statusRes.status, 200);
+        assert.equal(statusRes.headers["content-security-policy"], "default-src 'self'; connect-src 'self'");
         const snapshot = JSON.parse(statusRes.body);
         assert.equal(snapshot.security.uiTokenEnforced, true);
         assert.equal(snapshot.verdict.code, "IDLE");
@@ -190,11 +220,17 @@ describe("server HTTP 端到端集成测试", () => {
         });
         assert.equal(okHook.status, 200);
 
-        const afterHook = JSON.parse((await httpRequest(port, "GET", "/api/status?conversationId=conv-e2e")).body);
+        const afterHook = JSON.parse(
+          (
+            await httpRequest(port, "GET", "/api/status?conversationId=conv-e2e", {
+              headers: { "X-Sidecar-Token": "ui-secret-42" },
+            })
+          ).body,
+        );
         assert.equal(afterHook.hook.phase, "waiting_llm");
         assert.equal(afterHook.verdict.code, "WAITING_LLM");
 
-        const ssePromise = readFirstTwoSseEvents(port, "/api/events?conversationId=conv-e2e");
+        const ssePromise = readFirstTwoSseEvents(port, "/api/events?conversationId=conv-e2e&token=ui-secret-42");
         await new Promise((r) => setTimeout(r, 80));
         const cfgRes = await httpRequest(port, "POST", "/api/config", {
           headers: {
@@ -309,7 +345,9 @@ describe("server HTTP 端到端集成测试", () => {
         const pErr = await httpRequest(port, "POST", "/api/probe", { headers: uiHeaders, body: {} });
         assert.equal(pErr.status, 500);
 
-        const pacStatus = JSON.parse((await httpRequest(port, "GET", "/api/status")).body);
+        const pacStatus = JSON.parse(
+          (await httpRequest(port, "GET", "/api/status", { headers: { "X-Sidecar-Token": "ui-tok" } })).body,
+        );
         assert.equal(pacStatus.proxyConfig.source, "macos-pac-unsupported");
         assert.ok(pacStatus.events.some((e) => e.i18n?.key === "PAC_UNSUPPORTED"));
 
@@ -325,7 +363,9 @@ describe("server HTTP 端到端集成测试", () => {
         assert.equal(manualProbe.status, 200);
         assert.equal(lastManualProxyArg, "http://alice:secretpw@127.0.0.1:7897");
 
-        const maskedStatus = await httpRequest(port, "GET", "/api/status");
+        const maskedStatus = await httpRequest(port, "GET", "/api/status", {
+          headers: { "X-Sidecar-Token": "ui-tok" },
+        });
         assert.equal(maskedStatus.status, 200);
         assert.equal(maskedStatus.body.includes("secretpw"), false);
         assert.equal(JSON.parse(maskedStatus.body).config.manualProxyUrl, "http://***@127.0.0.1:7897");
@@ -467,6 +507,58 @@ describe("server HTTP 端到端集成测试", () => {
         assert.equal(notifications.length, 2);
       } finally {
         await app.stop();
+      }
+    });
+  });
+
+  it("未传 uiToken 且无环境变量时，仍默认随机生成令牌并强制校验全部 GET / POST API", async () => {
+    await withTempDir(async (dir) => {
+      const prevEnv = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+      delete process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+      try {
+        const app = await createStatusServer({
+          configPath: join(dir, "config.json"),
+          serverInfoPath: join(dir, "server.json"),
+          brainDirs: [join(dir, "brain")],
+          fallbackHookPath: join(dir, "hook-state.json"),
+          lsAddress: "",
+          sdkBridgeImpl: {
+            config: { conversationId: null },
+            getPreloadJs: () => "",
+            isSdkReady: () => false,
+            handleSidecarRoute: async () => ({ status: 404, data: {} }),
+          },
+          disableSchedulers: true,
+          writeServerInfo: false,
+        });
+        const port = await app.listen(0, "127.0.0.1");
+        try {
+          assert.equal(app.security.hasUiToken, true);
+          assert.ok(app.security.uiToken.length >= 32);
+
+          assert.equal((await httpRequest(port, "GET", "/api/status")).status, 401);
+          assert.equal((await httpRequest(port, "GET", "/api/events")).status, 401);
+          assert.equal((await httpRequest(port, "GET", "/api/unknown")).status, 401);
+          assert.equal(
+            (await httpRequest(port, "POST", "/api/probe", { headers: { "Content-Type": "application/json" }, body: {} })).status,
+            401,
+          );
+
+          const okStatus = await httpRequest(port, "GET", "/api/status", {
+            headers: { "X-Sidecar-Token": app.security.uiToken },
+          });
+          assert.equal(okStatus.status, 200);
+          assert.equal(JSON.parse(okStatus.body).security.uiTokenEnforced, true);
+
+          const notFoundWithTok = await httpRequest(port, "GET", "/api/unknown", {
+            headers: { "X-Sidecar-Token": app.security.uiToken },
+          });
+          assert.equal(notFoundWithTok.status, 404);
+        } finally {
+          await app.stop();
+        }
+      } finally {
+        if (prevEnv !== undefined) process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN = prevEnv;
       }
     });
   });

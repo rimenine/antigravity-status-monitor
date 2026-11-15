@@ -1,0 +1,116 @@
+name: Release Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag (leave blank to use v<plugin.json.version>)
+        required: false
+        type: string
+      prerelease:
+        description: Mark as pre-release
+        required: false
+        type: boolean
+        default: false
+      publish_release:
+        description: Create or update GitHub Release
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-release:
+    name: Build & Verify Release Bundles
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check JS/MJS syntax and run tests
+        env:
+          ASM_CI_OUTBOUND: "1"
+        run: |
+          set -euo pipefail
+          find . -type f \( -name '*.js' -o -name '*.mjs' \) -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.runtime/*' -print0 | xargs -0 -n 1 node --check
+          npm test
+
+      - name: Package zip & tar.gz installer bundles
+        id: pkg
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          PKG_VER="$(node -e "console.log(JSON.parse(require('fs').readFileSync('plugin.json','utf8')).version)")"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          elif [ -n "${INPUT_TAG}" ]; then
+            TAG="${INPUT_TAG}"
+          else
+            TAG="v${PKG_VER}"
+          fi
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          node scripts/package-release.mjs --out dist --tag "${TAG}"
+          ls -la dist
+
+      - name: Verify archive checksums & packaged installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum -c SHA256SUMS.txt)
+
+          TMP_ROOT="$(mktemp -d)"
+          trap 'rm -rf "$TMP_ROOT"' EXIT
+
+          unzip -q dist/agent-status-monitor.zip -d "${TMP_ROOT}/from-zip"
+          test -f "${TMP_ROOT}/from-zip/agent-status-monitor/plugin.json"
+          test -f "${TMP_ROOT}/from-zip/agent-status-monitor/install.sh"
+          test -f "${TMP_ROOT}/from-zip/agent-status-monitor/install.ps1"
+          test ! -d "${TMP_ROOT}/from-zip/agent-status-monitor/tests"
+          chmod +x "${TMP_ROOT}/from-zip/agent-status-monitor/install.sh"
+          sh "${TMP_ROOT}/from-zip/agent-status-monitor/install.sh" "${TMP_ROOT}/plugins-zip"
+          test -f "${TMP_ROOT}/plugins-zip/agent-status-monitor/sidecars/status-monitor/server.mjs"
+
+          mkdir -p "${TMP_ROOT}/from-tgz" "${TMP_ROOT}/plugins-tgz"
+          tar -xzf dist/agent-status-monitor.tar.gz -C "${TMP_ROOT}/from-tgz"
+          test -x "${TMP_ROOT}/from-tgz/agent-status-monitor/install.sh"
+          test -x "${TMP_ROOT}/from-tgz/agent-status-monitor/uninstall.sh"
+          sh "${TMP_ROOT}/from-tgz/agent-status-monitor/install.sh" "${TMP_ROOT}/plugins-tgz"
+          test -f "${TMP_ROOT}/plugins-tgz/agent-status-monitor/plugin.json"
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-bundles
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.pkg.outputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" dist/* --clobber
+          else
+            ARGS=(release create "${RELEASE_TAG}" dist/* --title "Antigravity Status Monitor ${RELEASE_TAG}" --generate-notes --target "${GITHUB_SHA}")
+            if [ "${PRERELEASE}" = "true" ]; then
+              ARGS+=(--prerelease)
+            fi
+            gh "${ARGS[@]}"
+          fi

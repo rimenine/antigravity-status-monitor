@@ -31,6 +31,9 @@ const I18N = {
     initBadge: "初始化中",
     initHeadline: "正在连接本地监控探针…",
     initSummary: "正在读取 Hooks 状态、对话日志与网络探针。",
+    authDeniedBadge: "AUTH · 鉴权拦截",
+    authDeniedHeadline: "缺少或无效的访问令牌",
+    authDeniedSummary: "请在 Antigravity 中打开面板，或使用启动日志输出的带 ?token=... URL 访问。",
     alertLeadHtml: "<strong>建议操作：</strong>当前主界面可能仍显示“工作中”，但请求已被断网阻塞。",
     alertSteps: "1. 检查 VPN / 代理是否掉线并重连；2. 若恢复后仍卡住，可点击取消当前回答后重试。",
     chartTitle: "VPN / 上游 HTTPS 探针曲线",
@@ -130,6 +133,9 @@ const I18N = {
     initBadge: "INIT",
     initHeadline: "Connecting to local monitor…",
     initSummary: "Reading Hooks, transcript logs & network probes.",
+    authDeniedBadge: "AUTH · DENIED",
+    authDeniedHeadline: "Missing or invalid access token",
+    authDeniedSummary: "Open inside Antigravity or use the full ?token=... URL printed by the server.",
     alertLeadHtml: "<strong>Action:</strong> The main UI may still show \"Working\", but upstream connectivity is lost.",
     alertSteps: "1. Check your network, proxy, or VPN connection; 2. If it stays stuck, cancel and retry.",
     chartTitle: "Upstream HTTPS Probe",
@@ -343,7 +349,7 @@ function applyTheme(themePref = configuredTheme) {
   }
 
   const probe = document.createElement("span");
-  probe.style.cssText = "position:absolute;visibility:hidden;color:var(--background)";
+  probe.className = "theme-probe";
   document.documentElement.appendChild(probe);
   const c = getComputedStyle(probe).color;
   probe.remove();
@@ -754,12 +760,16 @@ function render(data) {
 const urlParams = new URLSearchParams(window.location.search);
 const pageConvId = window.sidecar?.conversationId || urlParams.get("conversationId") || "";
 const urlToken = urlParams.get("token") || "";
-const statusEndpoint = pageConvId
-  ? `/api/status?conversationId=${encodeURIComponent(pageConvId)}`
-  : "/api/status";
-const eventsEndpoint = pageConvId
-  ? `/api/events?conversationId=${encodeURIComponent(pageConvId)}`
-  : "/api/events";
+const statusParams = new URLSearchParams();
+if (pageConvId) statusParams.set("conversationId", pageConvId);
+const statusQuery = statusParams.toString();
+const statusEndpoint = statusQuery ? `/api/status?${statusQuery}` : "/api/status";
+
+const eventsParams = new URLSearchParams();
+if (pageConvId) eventsParams.set("conversationId", pageConvId);
+if (urlToken) eventsParams.set("token", urlToken);
+const eventsQuery = eventsParams.toString();
+const eventsEndpoint = eventsQuery ? `/api/events?${eventsQuery}` : "/api/events";
 
 function apiFetch(path, options = {}) {
   if (window.sidecar?.fetch) {
@@ -799,7 +809,15 @@ function updateConnectionDot() {
 async function pollStatus() {
   try {
     const res = await apiFetch(statusEndpoint, { method: "GET" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      if ((res.status === 401 || res.status === 403) && !lastData) {
+        const d = dict();
+        setText("verdictBadge", d.authDeniedBadge);
+        setText("verdictHeadline", d.authDeniedHeadline);
+        setText("verdictSummary", d.authDeniedSummary);
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
     const data = await res.json();
     pollHealthy = true;
     updateConnectionDot();

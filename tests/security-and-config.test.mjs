@@ -13,6 +13,7 @@ import {
 } from "../sidecars/status-monitor/lib/config.mjs";
 import {
   createSecurityGuard,
+  isAllowedHost,
   isAllowedOrigin,
   isJsonContentType,
 } from "../sidecars/status-monitor/lib/security.mjs";
@@ -95,6 +96,78 @@ describe("security（CSRF 防护与双令牌鉴权）", () => {
       guard.verifyHookPost({ headers: { "content-type": "application/json", "x-hook-token": "hook-tok-1" } }).ok,
       true,
     );
+  });
+
+  it("isAllowedHost 仅放行回环地址并在未传 uiToken 时默认生成随机令牌且校验 GET / POST", () => {
+    assert.equal(isAllowedHost({ headers: { host: "127.0.0.1:57608" } }), true);
+    assert.equal(isAllowedHost({ headers: { host: "localhost:3000" } }), true);
+    assert.equal(isAllowedHost({ headers: { host: "[::1]:8080" } }), true);
+    assert.equal(isAllowedHost({ headers: { host: "evil.example:57608" } }), false);
+    assert.equal(isAllowedHost({ headers: { host: "127.0.0.1.evil.example" } }), false);
+    assert.equal(isAllowedHost({ headers: { host: "evil.localhost:57608" } }), false);
+    assert.equal(isAllowedHost({ headers: { host: "127.0.0.1:0" } }), false);
+    assert.equal(isAllowedHost({ headers: { host: "127.0.0.1:70000" } }), false);
+    assert.equal(isAllowedHost({ headers: {} }), false);
+
+    const prevEnvTok = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+    delete process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN;
+    try {
+      const defaultGuard = createSecurityGuard();
+      assert.equal(defaultGuard.hasUiToken, true);
+      assert.match(defaultGuard.uiToken, /^[0-9a-f]{48}$/);
+
+      const statusUrl = new URL("http://127.0.0.1:57608/api/status");
+      assert.equal(defaultGuard.verifyUiGet({ headers: { host: "evil.example:57608" } }, statusUrl).status, 403);
+      assert.equal(
+        defaultGuard.verifyUiGet(
+          {
+            headers: {
+              host: "127.0.0.1:57608",
+              "sec-fetch-site": "cross-site",
+              "x-sidecar-token": defaultGuard.uiToken,
+            },
+          },
+          statusUrl,
+        ).status,
+        403,
+      );
+      assert.equal(
+        defaultGuard.verifyUiGet(
+          { headers: { host: "127.0.0.1:57608", origin: "https://evil.example", "x-sidecar-token": defaultGuard.uiToken } },
+          statusUrl,
+        ).status,
+        403,
+      );
+      assert.equal(defaultGuard.verifyUiGet({ headers: { host: "127.0.0.1:57608" } }, statusUrl).status, 401);
+      assert.equal(
+        defaultGuard.verifyUiGet(
+          { headers: { host: "127.0.0.1:57608", "sec-fetch-site": "same-origin", "x-sidecar-token": defaultGuard.uiToken } },
+          statusUrl,
+        ).ok,
+        true,
+      );
+      assert.equal(
+        defaultGuard.verifyUiGet(
+          { headers: { host: "127.0.0.1:57608" } },
+          new URL(`http://127.0.0.1:57608/api/events?token=${defaultGuard.uiToken}`),
+        ).ok,
+        true,
+      );
+      assert.equal(
+        defaultGuard.verifyUiPost({ headers: { host: "127.0.0.1:57608", "content-type": "application/json" } }, probeUrl)
+          .status,
+        401,
+      );
+      assert.equal(
+        defaultGuard.verifyUiPost(
+          { headers: { host: "evil.example:57608", "content-type": "application/json", "x-sidecar-token": defaultGuard.uiToken } },
+          probeUrl,
+        ).status,
+        403,
+      );
+    } finally {
+      if (prevEnvTok !== undefined) process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN = prevEnvTok;
+    }
   });
 });
 

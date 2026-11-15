@@ -539,9 +539,9 @@ button.icon-btn {
   overflow: hidden;
   display: flex;
 }
-.token-seg-in { background: var(--mon-accent); transition: width 0.35s ease; }
-.token-seg-cache { background: var(--mon-ok); transition: width 0.35s ease; }
-.token-seg-out { background: var(--mon-tool); transition: width 0.35s ease; }
+.token-seg-in { width: 0%; background: var(--mon-accent); transition: width 0.35s ease; }
+.token-seg-cache { width: 0%; background: var(--mon-ok); transition: width 0.35s ease; }
+.token-seg-out { width: 0%; background: var(--mon-tool); transition: width 0.35s ease; }
 .token-legend {
   display: flex;
   align-items: center;
@@ -563,6 +563,15 @@ button.icon-btn {
   height: 7px;
   border-radius: 2px;
   display: inline-block;
+}
+.legend-dot-in { background: var(--mon-accent); }
+.legend-dot-cache { background: var(--mon-ok); }
+.legend-dot-out { background: var(--mon-tool); }
+.theme-probe {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  color: var(--background);
 }
 
 .timeline-head {

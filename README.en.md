@@ -28,8 +28,10 @@ Because a single spinner hides where execution paused, the panel tracks four dir
 3. **Dual-Link Upstream HTTPS Probes & SSE Stream**
    - Periodically opens fresh short-lived HTTPS `GET` probes (defaulting to `https://daily-cloudcode-pa.googleapis.com`) across direct/TUN and proxy routes (reading env vars / OS proxy settings, plus an optional manual proxy with HTTP `Basic` auth or unauthenticated SOCKS5).
    - **SSE + Polling Fallback**: Pushes updates over `/api/events` and quietly falls back to `/api/status` polling if the stream drops.
-4. **Local Endpoint Security**
-   - Binds strictly to `127.0.0.1`. Any `POST` endpoint requires `Content-Type: application/json`, checks loopback or trusted app `Origin` headers (`plugin://`, `vscode-webview://`, loopback; allowing empty native origins while rejecting `Origin: null`), verifies `X-Sidecar-Token` whenever `ANTIGRAVITY_SIDECAR_UI_TOKEN` is injected, and guards Hook posts with a separate random `X-Hook-Token`.
+4. **Default Auth on All APIs + DNS Rebinding Guard + Strict CSP**
+   - Binds strictly to `127.0.0.1` and validates the HTTP `Host` header against loopback addresses (`127.0.0.1`, `localhost`, `[::1]`) on every request to block DNS rebinding attacks;
+   - **Enforces authentication on all `GET /api/*` and `POST /api/*` routes by default**: even standalone launches without `ANTIGRAVITY_SIDECAR_UI_TOKEN` automatically generate a random 48-char hex `uiToken` (printed cleanly in the startup `?token=...` URL). Rejects `Sec-Fetch-Site: cross-site`, `Origin: null`, and untrusted origins, enforces `Content-Type: application/json` on `POST`, and separates UI tokens from the Hook token (`.runtime/server.json` never stores `uiToken`);
+   - **Strict Browser-Level CSP**: serves `Content-Security-Policy: default-src 'self'; connect-src 'self'` across dashboard assets and APIs (with zero inline styles or scripts), physically locking down outbound network requests from the WebView.
 
 ---
 
@@ -40,7 +42,7 @@ This is a lightweight Sidecar status monitor rather than a packet-level inspecto
 * **Fresh short probes passing doesn't guarantee an old stream is alive**: Probes open new short-lived HTTPS connections to check DNS/TLS/HTTP reachability (`2xx/3xx` and `400/404/405/410` count as reachable since `daily-cloudcode-pa.googleapis.com` returns `404` on `/`; `401/403/407/408/429/451` and `5xx` count as blocked or failed). If an already-open streaming connection goes half-dead upstream while a brand-new probe succeeds or fails over, the panel will lean toward **Possible Model Stall** rather than offline hang.
 * **What proxy & TUN detection covers**: Automatically reads **HTTP proxies** (including `Basic` auth) and **unauthenticated SOCKS5 proxies** from environment variables (`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`), Windows registry `HKCU`/`HKLM` (with `ProxyOverride` and `DefaultConnectionSettings`), macOS `scutil` (with `ExceptionsList`), and Linux GNOME `gsettings` (with `ignore-hosts`), plus a **Manual Proxy** box in Settings when you need an override (for PAC, non-GNOME Linux, standalone SOCKS5, etc.). **It does not evaluate PAC scripts (warns instead), `https://` or `socks4://` proxies, password-authenticated SOCKS5, enterprise NTLM auth, or process-injected transparent proxies; corporate MITM root certs not trusted by Node can also report TLS failures.** TUN interfaces are heuristically tagged using `198.18.0.0/15` (Fake-IP) and `100.64.0.0/10` (CGNAT / Tailscale / WireGuard).
 * **Small runtime footprint**: Antigravity spawns a short-lived Node/agy-node hook process on `PreInvocation` and `Stop`, while the Sidecar stays resident alongside the host.
-* **Read-only local GET routes**: `GET /api/status` and `GET /api/events` remain open on `127.0.0.1` so `EventSource` and the bridge page work cleanly. When launched standalone outside Antigravity (no `ANTIGRAVITY_SIDECAR_UI_TOKEN`), UI token checks are skipped while `Origin: null` is still blocked against sandboxed CSRF.
+* **Authenticated local API routes**: All `GET /api/*` (`/api/status`, `/api/events`) and `POST /api/*` routes require `X-Sidecar-Token` (or `?token=` for `EventSource`) by default alongside loopback `Host`, `Sec-Fetch-Site`, and `Origin` checks. Unauthenticated or cross-site local probes are rejected with `401`/`403`.
 * **Token math**: `total` simply adds raw `input_tokens + cache_read_tokens + output_tokens` occurrences across turns. Treat it as a rough sense of session workload and cache hit ratio rather than exact billing or quota usage. Live session stats follow the Hook-reported path; all-time stats scan `transcript.jsonl` (falling back to `transcript_full.jsonl`).
 
 ---
@@ -57,7 +59,24 @@ This is a lightweight Sidecar status monitor rather than a packet-level inspecto
 
 ## Quick Install & Uninstall
 
-### Option 1: Auto-Detect Installer Scripts (Recommended)
+### Option 1: GitHub Releases One-Click Packaged Bundles (Recommended)
+
+Download a prebuilt `.zip` or `.tar.gz` bundle (with `SHA256SUMS.txt`) from [Releases](https://github.com/rimenine/antigravity-status-monitor/releases/latest) — either extract `agent-status-monitor/` directly into your plugins folder, run the included `install.ps1` / `install.sh`, or install in one command:
+
+```powershell
+# Windows (PowerShell one-liner)
+$tmp = Join-Path $env:TEMP "asm-install"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force $tmp | Out-Null
+Invoke-WebRequest "https://github.com/rimenine/antigravity-status-monitor/releases/latest/download/agent-status-monitor.zip" -OutFile "$tmp\asm.zip"
+Expand-Archive "$tmp\asm.zip" -DestinationPath $tmp -Force
+powershell -ExecutionPolicy Bypass -File "$tmp\agent-status-monitor\install.ps1"
+```
+
+```bash
+# macOS / Linux (one-liner)
+TMP_DIR="$(mktemp -d)" && curl -fsSL "https://github.com/rimenine/antigravity-status-monitor/releases/latest/download/agent-status-monitor.tar.gz" | tar -xz -C "$TMP_DIR" && sh "$TMP_DIR/agent-status-monitor/install.sh" && rm -rf "$TMP_DIR"
+```
+
+### Option 2: Clone & Run Installer Script
 
 ```powershell
 # Windows (PowerShell)
@@ -73,7 +92,7 @@ cd antigravity-status-monitor
 sh ./install.sh
 ```
 
-The installer auto-detects `~/.gemini/config` and `agy-node` / `node`, copies only the files needed at runtime (skipping `tests/`, `docs/`, `.github/`, `.git/`, and `README.en.md`), and keeps any existing `.runtime/config.json` intact.
+The installer auto-detects `~/.gemini/config` and `agy-node` / `node`, copies only the files needed at runtime (skipping `tests/`, `docs/`, `.github/`, `.git/`, `scripts/`, and `README.en.md`), and keeps any existing `.runtime/config.json` intact.
 
 Uninstall (the uninstaller removes `sidecar.json` and stops the running Sidecar cleanly; if Antigravity is currently open, disabling the plugin or closing the IDE first avoids host auto-restart attempts during cleanup):
 
@@ -89,7 +108,7 @@ sh ./uninstall.sh                # Full removal
 sh ./uninstall.sh --keep-config  # Remove plugin, keep config.json
 ```
 
-### Option 2: Direct Clone into Antigravity Plugins Directory
+### Option 3: Direct Clone into Antigravity Plugins Directory
 
 ```bash
 # macOS / Linux
@@ -120,7 +139,11 @@ After installation, open or restart Antigravity and ask in chat to **`Open the A
 antigravity-status-monitor/
 ├── package.json                    # Package metadata and test runner (npm test)
 ├── plugin.json                     # Antigravity plugin manifest
-├── .github/workflows/ci.yml        # GitHub Actions matrix CI (Ubuntu / macOS / Windows)
+├── .github/workflows/
+│   ├── ci.yml                      # GitHub Actions matrix CI (Ubuntu / macOS / Windows)
+│   └── release.yml                 # Tag / manual GitHub Release packager workflow
+├── scripts/
+│   └── package-release.mjs         # Zero-dependency .zip / .tar.gz & SHA256SUMS bundler
 ├── hooks.json                      # Lifecycle Hooks (PreInvocation + Stop)
 ├── install.ps1 / uninstall.ps1     # Windows auto-detect installer / uninstaller
 ├── install.sh / uninstall.sh       # macOS / Linux auto-detect installer / uninstaller

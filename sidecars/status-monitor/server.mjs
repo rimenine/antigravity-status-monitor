@@ -18,7 +18,7 @@ import { probePaths } from "./lib/probe.mjs";
 import { getLsEndpoints, inspectLanguageServer } from "./lib/process-probe.mjs";
 import { getEnvProxy, invalidateProxyCache } from "./lib/proxy.mjs";
 import { createSdkBridge } from "./lib/sdk-bridge.mjs";
-import { createSecurityGuard } from "./lib/security.mjs";
+import { createSecurityGuard, isAllowedHost } from "./lib/security.mjs";
 import { createStateStore } from "./lib/state-store.mjs";
 import { computeVerdict, selectEffectiveProbe } from "./lib/verdict.mjs";
 
@@ -30,6 +30,7 @@ const STATIC_FILES = {
 };
 
 const BASE_SECURITY_HEADERS = {
+  "Content-Security-Policy": "default-src 'self'; connect-src 'self'",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
   "Cache-Control": "no-store",
@@ -480,6 +481,11 @@ export async function createStatusServer({
   }
 
   const server = http.createServer(async (req, res) => {
+    if (!isAllowedHost(req)) {
+      sendJson(res, 403, { ok: false, error: "Forbidden host" });
+      return;
+    }
+
     const url = new URL(req.url || "/", "http://127.0.0.1");
 
     if (req.method === "GET" && url.pathname === "/preload.js") {
@@ -521,9 +527,17 @@ export async function createStatusServer({
     }
 
     if (req.method === "GET" && url.pathname === "/favicon.ico") {
-      res.writeHead(204);
+      res.writeHead(204, BASE_SECURITY_HEADERS);
       res.end();
       return;
+    }
+
+    if (req.method === "GET" && url.pathname.startsWith("/api/")) {
+      const auth = security.verifyUiGet(req, url);
+      if (!auth.ok) {
+        sendJson(res, auth.status, { ok: false, error: auth.error });
+        return;
+      }
     }
 
     if (req.method === "GET" && url.pathname === "/api/status") {
@@ -697,7 +711,7 @@ export async function createStatusServer({
               null,
               2,
             ),
-            "utf8",
+            { encoding: "utf8", mode: 0o600 },
           );
         }
 
@@ -787,5 +801,9 @@ if (isMain) {
 
   const port = Number(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || 0);
   const actualPort = await app.listen(port, "127.0.0.1");
-  console.error(`Antigravity Status Monitor listening on http://127.0.0.1:${actualPort}`);
+  const hasEnvUiToken = Boolean(String(process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN || "").trim());
+  const listenUrl = hasEnvUiToken
+    ? `http://127.0.0.1:${actualPort}`
+    : `http://127.0.0.1:${actualPort}/?token=${encodeURIComponent(app.security.uiToken)}`;
+  console.error(`Antigravity Status Monitor listening on ${listenUrl}`);
 }

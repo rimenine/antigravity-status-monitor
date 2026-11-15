@@ -28,8 +28,10 @@
    - **SSE 实时推送 + 轮询兜底**：界面通过 `/api/events` 接收实时变化；如果流断开，会自动切回 `/api/status` 轮询。
 3. **宿主进程追踪与自动退出**
    - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；如果 Antigravity 已经关掉且 `/healthz` 连续连不上，Sidecar 会自动退出，不在后台留孤儿进程。
-4. **本地接口防护**
-   - 仅监听 `127.0.0.1`；写入类 `POST` 接口要求 `Content-Type: application/json`，校验受信任应用或回环 `Origin`（如 `plugin://` / `vscode-webview://` / 本地回环，允许原生无 Origin 请求但拦截 `Origin: null`），在宿主注入 `ANTIGRAVITY_SIDECAR_UI_TOKEN` 时强制校验 `X-Sidecar-Token`；Hook 上报使用独立的随机 `X-Hook-Token`。
+4. **默认全接口认证 + DNS 重绑定防护 + 严格 CSP 锁定**
+   - 仅监听 `127.0.0.1`，并在 HTTP 入口校验 `Host` 头仅允许回环地址（`127.0.0.1` / `localhost` / `[::1]`），直接拦截 DNS 重绑定探测；
+   - **所有 `GET /api/*` 与 `POST /api/*` 默认强制鉴权**：即使脱离宿主独立运行（未设置 `ANTIGRAVITY_SIDECAR_UI_TOKEN`），启动时也会自动生成随机 48 位 hex `uiToken`（并在控制台输出带 `?token=...` 的本机访问链接）；同时校验 `Sec-Fetch-Site`（拦截 `cross-site`）与 `Origin`（拦截 `Origin: null` 与外部域），`POST` 额外强制 `Content-Type: application/json`，Hook 上报使用独立的随机 `X-Hook-Token`（`.runtime/server.json` 不写入 `uiToken`）；
+   - **Dashboard 响应头锁定严格 CSP**：全部静态页面与 API 响应下发 `Content-Security-Policy: default-src 'self'; connect-src 'self'`（且前端无任何内联样式/脚本），从浏览器层面物理阻断面板向任何外部域名外发数据或加载外部资源。
 
 ---
 
@@ -40,7 +42,7 @@
 * **新建短探针能通 ≠ 旧的长连接还活着**：网络探针是周期性新建 HTTPS GET 短连接测试域名 / TLS / HTTP 是否通畅（`2xx/3xx` 及 `400/404/405/410` 视为上游有响应，因为 `daily-cloudcode-pa.googleapis.com` 根路径默认返回 `404`；`401/403/407/408/429/451` 与 `5xx` 均判定为阻塞或失败）。如果只是代理节点波动导致**原本那条流式长连接半开假死**，而新建探针刚好切换到了可用节点，面板会倾向显示“网络正常 / 疑似模型卡顿”。
 * **代理与 TUN 识别覆盖范围**：支持环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`）、Windows 注册表 `HKCU`/`HKLM`（含 `ProxyOverride` 绕过列表与 `DefaultConnectionSettings` 开关校验）、macOS `scutil`（含 `ExceptionsList`）、Linux GNOME `gsettings`（含 `ignore-hosts`）中的 **HTTP 代理**（含基础 `Basic` 鉴权）与**无认证 SOCKS5 代理**，并支持设置面板里的**「手动代理」**兜底（适合 PAC、非 GNOME 桌面、纯 SOCKS5 等场景）；**暂不支持解析 PAC 脚本（会给提示）、`https://`/`socks4://` 代理、带密码的 SOCKS5、企业 NTLM 域认证或按进程注入式透明分流工具；公司网关若使用了未导入 Node 信任链的中间人自签根证书，也可能报 TLS 失败**。TUN 网卡基于 `198.18.0.0/15`（Fake-IP）与 `100.64.0.0/10`（CGNAT / Tailscale / WireGuard 等常见段）做启发式归类。
 * **Hooks 与常驻开销**：Antigravity 每次 `PreInvocation` / `Stop` 时会拉起一次短暂的轻量 Hook 进程；Sidecar 本身为常驻本地 Node 进程。
-* **本地只读接口范围**：为了兼容 `EventSource` 与内置桥接页，`GET /api/status` 与 `GET /api/events` 在 `127.0.0.1` 保持只读开放；未从 Antigravity Sidecar 容器启动（无 `ANTIGRAVITY_SIDECAR_UI_TOKEN`）时会跳过 UI Token 校验，仍只允许空 Origin、回环与受信任应用容器 Origin（拦截 `Origin: null` 防范沙盒 CSRF）。
+* **本地接口访问范围**：即使仅绑定 `127.0.0.1`，全部 `GET /api/*`（含 `/api/status`、`/api/events`）与 `POST /api/*` 均默认强制校验 `X-Sidecar-Token`（或 SSE 使用的 `?token=`）、`Host` 回环白名单、`Sec-Fetch-Site` 与 `Origin`；未授权网页或未携带 Token 的本机请求会被直接拦截（`401`/`403`）。
 * **Token 统计口径**：`total` 直接累加 `input_tokens + cache_read_tokens + output_tokens` 的原始次数，用来直观感受工作量与缓存命中趋势即可，不能直接等同于官方计费或配额扣减；当前会话优先走 Hook 上报路径，全量历史统计扫描 `transcript.jsonl`（不存在时回退 `transcript_full.jsonl`）。
 
 ---
@@ -57,7 +59,24 @@
 
 ## 快速安装与卸载
 
-### 方式一：自动检测安装脚本（推荐）
+### 方式一：GitHub Releases 一键安装包（推荐，免源码测试文件）
+
+前后端无任何第三方依赖，可直接下载 [Releases](https://github.com/rimenine/antigravity-status-monitor/releases/latest) 中的预打包压缩包（附 `SHA256SUMS.txt`），解压到任意目录运行安装脚本（或直接将包内 `agent-status-monitor/` 目录解压放进插件目录），也可以直接执行一行安装命令：
+
+```powershell
+# Windows (PowerShell 一键拉取最新安装包并安装)
+$tmp = Join-Path $env:TEMP "asm-install"; Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Force $tmp | Out-Null
+Invoke-WebRequest "https://github.com/rimenine/antigravity-status-monitor/releases/latest/download/agent-status-monitor.zip" -OutFile "$tmp\asm.zip"
+Expand-Archive "$tmp\asm.zip" -DestinationPath $tmp -Force
+powershell -ExecutionPolicy Bypass -File "$tmp\agent-status-monitor\install.ps1"
+```
+
+```bash
+# macOS / Linux (一键拉取最新安装包并安装)
+TMP_DIR="$(mktemp -d)" && curl -fsSL "https://github.com/rimenine/antigravity-status-monitor/releases/latest/download/agent-status-monitor.tar.gz" | tar -xz -C "$TMP_DIR" && sh "$TMP_DIR/agent-status-monitor/install.sh" && rm -rf "$TMP_DIR"
+```
+
+### 方式二：源码克隆安装
 
 ```powershell
 # Windows (PowerShell)
@@ -73,7 +92,7 @@ cd antigravity-status-monitor
 sh ./install.sh
 ```
 
-脚本会自动检测 `~/.gemini/config` 和 `agy-node` / `node`，只拷贝运行必需文件（跳过 `tests/`、`docs/`、`.github/`、`.git/` 与 `README.en.md`），已有的 `.runtime/config.json` 配置也会原样保留。
+脚本会自动检测 `~/.gemini/config` 和 `agy-node` / `node`，只拷贝运行必需文件（跳过 `tests/`、`docs/`、`.github/`、`.git/`、`scripts/` 与 `README.en.md`），已有的 `.runtime/config.json` 配置也会原样保留。
 
 卸载（脚本会自动先清理配置并停止运行中的 Sidecar；如果 Antigravity 正开着，建议先停用插件或关闭 IDE 再卸载，避免宿主保活拉起）：
 
@@ -89,7 +108,7 @@ sh ./uninstall.sh                # 完全卸载
 sh ./uninstall.sh --keep-config  # 卸载但保留配置文件
 ```
 
-### 方式二：直接克隆到 Antigravity 插件目录
+### 方式三：直接克隆到 Antigravity 插件目录
 
 ```bash
 # macOS / Linux
@@ -120,7 +139,11 @@ git clone https://github.com/rimenine/antigravity-status-monitor.git
 antigravity-status-monitor/
 ├── package.json                    # 插件元数据与测试入口（npm test）
 ├── plugin.json                     # Antigravity 插件清单
-├── .github/workflows/ci.yml        # GitHub Actions 三平台自动化 CI
+├── .github/workflows/
+│   ├── ci.yml                      # GitHub Actions 三平台自动化 CI
+│   └── release.yml                 # Tag / 手动一键打包 GitHub Release 流水线
+├── scripts/
+│   └── package-release.mjs         # 零依赖打包 .zip / .tar.gz 与 SHA256SUMS.txt
 ├── hooks.json                      # 生命周期 Hooks（PreInvocation + Stop）
 ├── install.ps1 / uninstall.ps1     # Windows 一键检测安装 / 卸载脚本
 ├── install.sh / uninstall.sh       # macOS / Linux 一键检测安装 / 卸载脚本
