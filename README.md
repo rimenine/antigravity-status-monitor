@@ -59,9 +59,22 @@
 
 ## 快速安装与卸载
 
-### 方式一：GitHub Releases 一键安装包（推荐，免源码测试文件）
+### 方式一：让反重力 (Antigravity) 帮你自动下载并安装（推荐，零 Git / 零命令行）
 
-前后端无任何第三方依赖，可直接下载 [Releases](https://github.com/rimenine/antigravity-status-monitor/releases/latest) 中的预打包压缩包（附 `SHA256SUMS.txt`），解压到任意目录运行安装脚本（或直接将包内 `agent-status-monitor/` 目录解压放进插件目录），也可以直接执行一行安装命令：
+不会用 Git 或命令行也没关系。新建一个 Antigravity 对话，直接复制下面这段话发给它，反重力会自动完成下载、校验、解压与安装（已有 `.runtime/config.json` 配置也会原样保留）：
+
+```text
+请帮我下载并安装（或更新）反重力状态监控插件 Antigravity Status Monitor：
+1. 从 https://github.com/rimenine/antigravity-status-monitor/releases/latest 下载适合我当前系统的安装包（Windows 用 agent-status-monitor.zip，macOS / Linux 用 agent-status-monitor.tar.gz），如有 SHA256SUMS.txt 请先校验文件完整性；若暂无预打包 Release，则改用主分支源码包。
+2. 解压到临时目录后，运行其中的 install.ps1（Windows）或 install.sh（macOS / Linux）完成安装，脚本会自动保留我原有的 .runtime/config.json。
+3. 安装完成后清理临时目录，并验证插件文件与面板入口是否就绪。
+```
+
+> 升级插件同样适用：把同一段话再发给 Antigravity 一次，它会自动停止旧版 Sidecar、替换运行文件并保留你的预警阈值与通知配置。
+
+### 方式二：手动下载 Releases 压缩包或命令行安装
+
+前后端无任何第三方依赖，可直接下载 [Releases](https://github.com/rimenine/antigravity-status-monitor/releases/latest) 中的预打包压缩包（附 `SHA256SUMS.txt`），解压到任意目录运行安装脚本（或直接将包内 `agent-status-monitor/` 目录解压放进 `~/.gemini/config/plugins/`），也可以直接执行一行安装命令：
 
 ```powershell
 # Windows (PowerShell 一键拉取最新安装包并安装)
@@ -76,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File "$tmp\agent-status-monitor\install.ps1"
 TMP_DIR="$(mktemp -d)" && curl -fsSL "https://github.com/rimenine/antigravity-status-monitor/releases/latest/download/agent-status-monitor.tar.gz" | tar -xz -C "$TMP_DIR" && sh "$TMP_DIR/agent-status-monitor/install.sh" && rm -rf "$TMP_DIR"
 ```
 
-### 方式二：源码克隆安装
+### 方式三：Git 源码克隆安装与卸载
 
 ```powershell
 # Windows (PowerShell)
@@ -92,9 +105,9 @@ cd antigravity-status-monitor
 sh ./install.sh
 ```
 
-脚本会自动检测 `~/.gemini/config` 和 `agy-node` / `node`，只拷贝运行必需文件（跳过 `tests/`、`docs/`、`.github/`、`.git/`、`scripts/` 与 `README.en.md`），已有的 `.runtime/config.json` 配置也会原样保留。
+也可以直接将仓库克隆到 `~/.gemini/config/plugins/agent-status-monitor`。`install.ps1` / `install.sh` 脚本会自动检测 `~/.gemini/config` 和 `agy-node` / `node`，只拷贝运行必需文件（跳过 `tests/`、`docs/`、`.github/`、`.git/`、`scripts/` 与 `README.en.md`），已有的 `.runtime/config.json` 配置也会原样保留。
 
-卸载（脚本会自动先清理配置并停止运行中的 Sidecar；如果 Antigravity 正开着，建议先停用插件或关闭 IDE 再卸载，避免宿主保活拉起）：
+卸载（脚本会自动先清理配置并停止运行中的 Sidecar；如果 Antigravity 正开着，建议先停用插件或关闭 IDE 再卸载，避免宿主保活拉起；也可以直接让 Antigravity 运行插件目录中的 `uninstall.ps1` / `uninstall.sh`）：
 
 ```powershell
 # Windows (PowerShell)
@@ -108,21 +121,7 @@ sh ./uninstall.sh                # 完全卸载
 sh ./uninstall.sh --keep-config  # 卸载但保留配置文件
 ```
 
-### 方式三：直接克隆到 Antigravity 插件目录
-
-```bash
-# macOS / Linux
-cd ~/.gemini/config/plugins
-git clone https://github.com/rimenine/antigravity-status-monitor.git
-```
-
-```powershell
-# Windows (PowerShell)
-cd "$env:USERPROFILE\.gemini\config\plugins"
-git clone https://github.com/rimenine/antigravity-status-monitor.git
-```
-
-安装后打开或重启 Antigravity，在对话中发送 **`打开反重力状态监控面板`** 即可唤出右侧面板。
+安装后打开或重启 Antigravity（若为覆盖更新，建议在插件管理中关闭再重新开启一次，或重启 IDE），在对话中发送 **`打开反重力状态监控面板`** 即可唤出右侧面板。
 
 ---
 
@@ -157,7 +156,7 @@ antigravity-status-monitor/
 ├── tests/                          # 单元测试与真实系统命令集成测试（node:test）
 └── sidecars/status-monitor/
     ├── sidecar.json                # Sidecar 注册配置
-    ├── server.mjs                  # HTTP 服务、安全校验、SSE 广播与调度
+    ├── server.mjs                  # HTTP 服务、安全校验、状态轮询/SSE 与调度
     ├── lib/
     │   ├── config.mjs              # 运行时路径与配置持久化
     │   ├── i18n.mjs                # 中英文双语文案、事件与通知翻译

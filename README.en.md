@@ -59,9 +59,22 @@ This is a lightweight Sidecar status monitor rather than a packet-level inspecto
 
 ## Quick Install & Uninstall
 
-### Option 1: GitHub Releases One-Click Packaged Bundles (Recommended)
+### Option 1: Ask Antigravity to Download & Install Automatically (Recommended, No Git / CLI Needed)
 
-Download a prebuilt `.zip` or `.tar.gz` bundle (with `SHA256SUMS.txt`) from [Releases](https://github.com/rimenine/antigravity-status-monitor/releases/latest) — either extract `agent-status-monitor/` directly into your plugins folder, run the included `install.ps1` / `install.sh`, or install in one command:
+Not familiar with Git or terminal commands? Open a new Antigravity chat, paste the prompt below, and Antigravity will download, verify, extract, and install the plugin for you while preserving any existing `.runtime/config.json`:
+
+```text
+Please download and install (or update) the Antigravity Status Monitor plugin for me:
+1. Download the package matching my OS from https://github.com/rimenine/antigravity-status-monitor/releases/latest (agent-status-monitor.zip on Windows, agent-status-monitor.tar.gz on macOS / Linux), verify its checksum against SHA256SUMS.txt if present, or fall back to downloading the main branch source archive if no prebuilt Release is available.
+2. Extract it to a temporary directory and run install.ps1 (Windows) or install.sh (macOS / Linux), keeping my existing .runtime/config.json intact.
+3. Clean up the temporary files afterward and verify the plugin files and side pane entrypoint are ready.
+```
+
+> Works for upgrades too: send the same prompt again and Antigravity will stop the old Sidecar cleanly, update runtime files, and preserve your threshold and notification settings.
+
+### Option 2: GitHub Releases Archive or One-Line Command
+
+Download a prebuilt `.zip` or `.tar.gz` bundle (with `SHA256SUMS.txt`) from [Releases](https://github.com/rimenine/antigravity-status-monitor/releases/latest) — extract `agent-status-monitor/` directly into `~/.gemini/config/plugins/`, run the included `install.ps1` / `install.sh`, or install in one command:
 
 ```powershell
 # Windows (PowerShell one-liner)
@@ -76,7 +89,7 @@ powershell -ExecutionPolicy Bypass -File "$tmp\agent-status-monitor\install.ps1"
 TMP_DIR="$(mktemp -d)" && curl -fsSL "https://github.com/rimenine/antigravity-status-monitor/releases/latest/download/agent-status-monitor.tar.gz" | tar -xz -C "$TMP_DIR" && sh "$TMP_DIR/agent-status-monitor/install.sh" && rm -rf "$TMP_DIR"
 ```
 
-### Option 2: Clone & Run Installer Script
+### Option 3: Git Clone Installer & Uninstall
 
 ```powershell
 # Windows (PowerShell)
@@ -92,9 +105,9 @@ cd antigravity-status-monitor
 sh ./install.sh
 ```
 
-The installer auto-detects `~/.gemini/config` and `agy-node` / `node`, copies only the files needed at runtime (skipping `tests/`, `docs/`, `.github/`, `.git/`, `scripts/`, and `README.en.md`), and keeps any existing `.runtime/config.json` intact.
+You can also clone directly into `~/.gemini/config/plugins/agent-status-monitor`. The `install.ps1` / `install.sh` script auto-detects `~/.gemini/config` and `agy-node` / `node`, copies only the files needed at runtime (skipping `tests/`, `docs/`, `.github/`, `.git/`, `scripts/`, and `README.en.md`), and keeps any existing `.runtime/config.json` intact.
 
-Uninstall (the uninstaller removes `sidecar.json` and stops the running Sidecar cleanly; if Antigravity is currently open, disabling the plugin or closing the IDE first avoids host auto-restart attempts during cleanup):
+Uninstall (the uninstaller removes `sidecar.json` and stops the running Sidecar cleanly; if Antigravity is currently open, disabling the plugin or closing the IDE first avoids host auto-restart attempts during cleanup; you can also ask Antigravity to run `uninstall.ps1` / `uninstall.sh` inside the plugin directory):
 
 ```powershell
 # Windows (PowerShell)
@@ -108,21 +121,7 @@ sh ./uninstall.sh                # Full removal
 sh ./uninstall.sh --keep-config  # Remove plugin, keep config.json
 ```
 
-### Option 3: Direct Clone into Antigravity Plugins Directory
-
-```bash
-# macOS / Linux
-cd ~/.gemini/config/plugins
-git clone https://github.com/rimenine/antigravity-status-monitor.git
-```
-
-```powershell
-# Windows (PowerShell)
-cd "$env:USERPROFILE\.gemini\config\plugins"
-git clone https://github.com/rimenine/antigravity-status-monitor.git
-```
-
-After installation, open or restart Antigravity and ask in chat to **`Open the Antigravity Status Monitor panel`** (or **`打开反重力状态监控面板`**) to bring up the side pane.
+After installation, open or restart Antigravity (or toggle the plugin off and back on after upgrading), and ask in chat to **`Open the Antigravity Status Monitor panel`** (or **`打开反重力状态监控面板`**) to bring up the side pane.
 
 ---
 
@@ -157,7 +156,7 @@ antigravity-status-monitor/
 ├── tests/                          # Unit and real-process integration tests (node:test)
 └── sidecars/status-monitor/
     ├── sidecar.json                # Sidecar registration manifest
-    ├── server.mjs                  # HTTP server, security guard, SSE broadcast & scheduler
+    ├── server.mjs                  # HTTP server, security guard, status polling/SSE & scheduler
     ├── lib/
     │   ├── config.mjs              # Runtime paths and config persistence
     │   ├── i18n.mjs                # Chinese/English localization strings & verdict copy
