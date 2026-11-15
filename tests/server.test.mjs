@@ -127,7 +127,8 @@ describe("server HTTP 端到端集成测试", () => {
         const jsRes = await httpRequest(port, "GET", "/app.js");
         assert.equal(jsRes.status, 200);
         assert.equal(jsRes.headers["content-security-policy"], "default-src 'self'; connect-src 'self'");
-        assert.match(jsRes.body, /new EventSource/);
+        assert.match(jsRes.body, /pollStatus/);
+        assert.doesNotMatch(jsRes.body, /\bnew EventSource\b/);
 
         const unauthStatus = await httpRequest(port, "GET", "/api/status?conversationId=unauth-conv");
         assert.equal(unauthStatus.status, 401);
@@ -615,6 +616,149 @@ describe("server HTTP 端到端集成测试", () => {
       }
       assert.equal(existsSync(inst1Path), false);
       assert.equal(existsSync(serverInfoPath), false);
+    });
+  });
+
+  it("HTTP/1.1 并发短轮询不阻塞操作、SSE 强断零泄漏且 conversationId=auto 自动跟随活跃会话", async () => {
+    await withTempDir(async (dir) => {
+      const app = await createStatusServer({
+        configPath: join(dir, "config.json"),
+        serverInfoPath: join(dir, "server.json"),
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(dir, "hook-state.json"),
+        uiToken: "ui-tok-follow",
+        hookToken: "hk-tok-follow",
+        lsAddress: "",
+        sdkBridgeImpl: {
+          config: { conversationId: "conv-pinned-idle" },
+          getPreloadJs: () => "",
+          isSdkReady: () => false,
+          handleSidecarRoute: async () => ({ status: 404, data: {} }),
+        },
+        probePathsFn: async () => ({
+          proxyConfig: null,
+          direct: { ok: true, statusCode: 404, latencyMs: 18, mode: "direct", error: null },
+          proxy: null,
+        }),
+        inspectLsFn: async () => ({
+          running: true,
+          pids: ["888"],
+          lsPid: "888",
+          matchedByPort: true,
+          established443: 1,
+          synSent443: 0,
+          proxyConns: 0,
+          tunDetected: false,
+          localIps: [],
+          route: "direct",
+          healthz: { reachable: true, instanceId: "e2e-follow" },
+        }),
+        notifyFn: () => {},
+        disableSchedulers: true,
+        writeServerInfo: false,
+      });
+
+      const port = await app.listen(0, "127.0.0.1");
+      const uiHeaders = { "X-Sidecar-Token": "ui-tok-follow" };
+      const postHeaders = {
+        Origin: "plugin://agent-status-monitor",
+        "Content-Type": "application/json",
+        "X-Sidecar-Token": "ui-tok-follow",
+      };
+
+      try {
+        const now = Date.now();
+        await httpRequest(port, "POST", "/api/hook", {
+          headers: { "Content-Type": "application/json", "X-Hook-Token": "hk-tok-follow" },
+          body: {
+            eventName: "Stop",
+            receivedAt: now - 5000,
+            payload: { conversationId: "conv-pinned-idle", terminationReason: "DONE" },
+          },
+        });
+        await httpRequest(port, "POST", "/api/hook", {
+          headers: { "Content-Type": "application/json", "X-Hook-Token": "hk-tok-follow" },
+          body: {
+            eventName: "PreInvocation",
+            receivedAt: now,
+            payload: { conversationId: "conv-active-other", invocationNum: 3 },
+          },
+        });
+
+        const pinnedSnap = JSON.parse(
+          (await httpRequest(port, "GET", "/api/status?conversationId=conv-pinned-idle", { headers: uiHeaders })).body,
+        );
+        assert.equal(pinnedSnap.activeConversationId, "conv-pinned-idle");
+        assert.equal(pinnedSnap.verdict.code, "IDLE");
+
+        const autoSnap = JSON.parse(
+          (await httpRequest(port, "GET", "/api/status?conversationId=auto", { headers: uiHeaders })).body,
+        );
+        assert.equal(autoSnap.activeConversationId, "conv-active-other");
+        assert.equal(autoSnap.verdict.code, "WAITING_LLM");
+        assert.ok(Array.isArray(autoSnap.recentConversations));
+        assert.equal(autoSnap.recentConversations[0].id, "conv-active-other");
+        assert.equal(autoSnap.recentConversations[0].active, true);
+        assert.ok(autoSnap.recentConversations.some((c) => c.id === "conv-pinned-idle" && c.active === false));
+
+        // 模拟 6 个 SSE 客户端连接后突然断开，验证服务端零泄漏
+        const sseReqs = await Promise.all(
+          Array.from({ length: 6 }, () =>
+            new Promise((resolve) => {
+              const req = http.get(
+                `http://127.0.0.1:${port}/api/events?conversationId=auto&token=ui-tok-follow`,
+                (res) => {
+                  res.once("data", () => resolve(req));
+                },
+              );
+            }),
+          ),
+        );
+        assert.equal(app.getSseClientCount(), 6);
+        for (const r of sseReqs) r.destroy();
+        await new Promise((r) => setTimeout(r, 60));
+        assert.equal(app.getSseClientCount(), 0);
+
+        // 用模拟 Chromium 的 HTTP/1.1 6-socket 连接池执行 24 个并发轮询 + 预览告警切换 + 首页加载
+        const poolAgent = new http.Agent({ keepAlive: true, maxSockets: 6 });
+        const pooledReq = (method, path, headers = {}, body = null) =>
+          new Promise((resolve, reject) => {
+            const payload = body == null ? null : JSON.stringify(body);
+            const h = { ...headers };
+            if (payload != null) h["Content-Length"] = Buffer.byteLength(payload);
+            const req = http.request(
+              { hostname: "127.0.0.1", port, path, method, headers: h, agent: poolAgent },
+              (res) => {
+                let raw = "";
+                res.setEncoding("utf8");
+                res.on("data", (d) => (raw += d));
+                res.on("end", () => resolve({ status: res.statusCode, body: raw }));
+              },
+            );
+            req.on("error", reject);
+            if (payload != null) req.write(payload);
+            req.end();
+          });
+
+        try {
+          const startedAt = Date.now();
+          const batch = await Promise.all([
+            ...Array.from({ length: 20 }, () => pooledReq("GET", "/api/status?conversationId=auto", uiHeaders)),
+            pooledReq("GET", "/"),
+            pooledReq("POST", "/api/simulate", postHeaders, { active: true }),
+            pooledReq("GET", "/api/status?conversationId=auto", uiHeaders),
+            pooledReq("POST", "/api/simulate", postHeaders, { active: false }),
+          ]);
+          const elapsed = Date.now() - startedAt;
+          assert.ok(batch.every((r) => r.status === 200));
+          assert.ok(elapsed < 3000, `Expected fast non-blocked responses, took ${elapsed}ms`);
+          assert.equal(app.getSseClientCount(), 0);
+        } finally {
+          poolAgent.destroy();
+        }
+      } finally {
+        await app.stop();
+      }
     });
   });
 });

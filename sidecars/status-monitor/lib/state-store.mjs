@@ -364,41 +364,85 @@ export function createStateStore({
     return Boolean(hActive || tActive);
   }
 
+  function getConvUpdatedAt(conv) {
+    if (!conv) return 0;
+    return Math.max(conv.hook?.lastEventAt || 0, conv.transcript?.latestStepAt || 0);
+  }
+
+  function listRecentConversations(now = Date.now(), limit = 8) {
+    const items = [];
+    for (const [id, conv] of conversations.entries()) {
+      if (!id || id === "default") continue;
+      const updatedAt = getConvUpdatedAt(conv);
+      if (!updatedAt && !conv.transcript?.filePath) continue;
+      const active = isConvActive(conv, now);
+      const hookPhase = conv.hook?.phase || "idle";
+      const transcriptPhase = conv.transcript?.inferredPhase || "idle";
+      const phase = active ? (hookPhase !== "idle" ? hookPhase : transcriptPhase) : "idle";
+      items.push({
+        id,
+        active,
+        phase,
+        updatedAt,
+        stepIdx: conv.transcript?.latestStepIndex ?? conv.hook?.stepIdx ?? null,
+      });
+    }
+    items.sort((a, b) => {
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      return b.updatedAt - a.updatedAt;
+    });
+    return items.slice(0, limit);
+  }
+
   function resolveActiveConversation(requestedConvId = null) {
-    if (requestedConvId) {
-      const reqPath = findTranscriptPathForConv(requestedConvId);
-      if (reqPath && !conversations.get(requestedConvId)?.transcript?.filePath) {
-        parseTranscriptFile(requestedConvId, reqPath, false);
+    const normalizedReqId = requestedConvId === "auto" ? null : requestedConvId;
+    if (normalizedReqId) {
+      const reqPath = findTranscriptPathForConv(normalizedReqId);
+      if (reqPath && !conversations.get(normalizedReqId)?.transcript?.filePath) {
+        parseTranscriptFile(normalizedReqId, reqPath, false);
       }
-      const existing = conversations.get(requestedConvId);
+      const existing = conversations.get(normalizedReqId);
       if (existing && (existing.hook.lastEventAt || existing.transcript.filePath)) {
         return existing;
       }
       return {
-        hook: createEmptyHook(requestedConvId),
-        transcript: createEmptyTranscript(requestedConvId),
+        hook: createEmptyHook(normalizedReqId),
+        transcript: createEmptyTranscript(normalizedReqId),
       };
     }
 
     const now = Date.now();
-    if (latestConvId) {
-      const pinned = conversations.get(latestConvId);
-      if (pinned && (isConvActive(pinned, now) || pinned.hook.lastEventAt || pinned.transcript.filePath)) {
-        return pinned;
-      }
+    const pinned = latestConvId ? conversations.get(latestConvId) : null;
+    if (pinned && isConvActive(pinned, now)) {
+      return pinned;
     }
 
+    let bestActive = null;
+    let bestActiveTs = -1;
     let bestConv = null;
     let bestTs = -1;
-    for (const [, conv] of conversations) {
-      const ts = Math.max(conv.hook.lastEventAt || 0, conv.transcript.latestStepAt || 0);
+    for (const [id, conv] of conversations) {
+      if (id === "default") continue;
+      const ts = getConvUpdatedAt(conv);
+      if (isConvActive(conv, now) && ts > bestActiveTs) {
+        bestActiveTs = ts;
+        bestActive = conv;
+      }
       if (ts > bestTs) {
         bestTs = ts;
         bestConv = conv;
       }
     }
 
+    if (bestActive) return bestActive;
+    if (pinned && (pinned.hook.lastEventAt || pinned.transcript.filePath)) {
+      return pinned;
+    }
     if (bestConv) return bestConv;
+    const defConv = conversations.get("default");
+    if (defConv && (defConv.hook.lastEventAt || defConv.transcript.filePath)) {
+      return defConv;
+    }
     if (latestConvId) return getOrCreateConv(latestConvId);
     return getOrCreateConv("default");
   }
@@ -616,7 +660,8 @@ export function createStateStore({
       simulation.expiresAt = null;
     }
 
-    const conv = resolveActiveConversation(requestedConvId);
+    const effectiveReqId = requestedConvId === "auto" ? null : requestedConvId;
+    const conv = resolveActiveConversation(effectiveReqId);
     const verdict = computeVerdict({
       hook: conv.hook,
       transcript: conv.transcript,
@@ -639,7 +684,7 @@ export function createStateStore({
 
     return {
       now,
-      activeConversationId: conv.hook.conversationId || conv.transcript.conversationId || requestedConvId || null,
+      activeConversationId: conv.hook.conversationId || conv.transcript.conversationId || effectiveReqId || null,
       verdict,
       config,
       hook: conv.hook,
@@ -654,6 +699,7 @@ export function createStateStore({
         consecutiveFailures,
       },
       simulation,
+      recentConversations: listRecentConversations(now),
       events: events.map((ev) => resolveEventText(ev, config?.lang || "zh")),
     };
   }
@@ -666,6 +712,7 @@ export function createStateStore({
     applyHookEvent,
     loadFallbackHookIfNewer,
     clearFallbackHook,
+    listRecentConversations,
     resolveActiveConversation,
     buildSnapshot,
   };

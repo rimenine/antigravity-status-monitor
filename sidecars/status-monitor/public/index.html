@@ -32,6 +32,8 @@
       </div>
     </header>
 
+    <div class="action-banner" id="actionBanner" role="status" aria-live="polite"></div>
+
     <section class="card hero" id="heroCard" data-severity="neutral">
       <div class="hero-main">
         <div class="orb-wrap">
@@ -191,7 +193,12 @@
     <section class="card">
       <div class="timeline-head">
         <span class="section-title" data-i18n="timelineTitle">Live Event Stream (Hooks &amp; Network)</span>
-        <span class="tl-time" id="convBadge">Chat: --</span>
+        <div class="timeline-meta">
+          <select class="conv-select" id="convSelect" aria-label="Conversation scope" data-i18n-aria="convSelectAria">
+            <option value="auto" data-i18n-opt="convAutoOpt">Auto (Active)</option>
+          </select>
+          <span class="tl-time" id="convBadge">Chat: --</span>
+        </div>
       </div>
       <div class="timeline-list" id="timelineList">
         <div class="empty-state">No events yet. Start a chat or wait for probe changes.</div>

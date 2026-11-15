@@ -5,8 +5,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import http from "node:http";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { runInNewContext } from "node:vm";
 import { packageRelease } from "../scripts/package-release.mjs";
 import { createSdkBridge } from "../sidecars/status-monitor/lib/sdk-bridge.mjs";
+import { createStatusServer } from "../sidecars/status-monitor/server.mjs";
 import { PLUGIN_ROOT, withTempDir } from "./helpers.mjs";
 
 function runHookReporter({ pluginRoot, eventName, stdinPayload, env = {} }) {
@@ -229,12 +231,16 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.doesNotMatch(html, /\bstyle\s*=|<style\b/i);
     assert.doesNotMatch(html, /var\(--(accent|ok|tool)\)/);
     assert.ok(htmlIds.has("btnLangZh") && htmlIds.has("btnLangEn"));
+    assert.ok(htmlIds.has("actionBanner") && htmlIds.has("convSelect"));
     assert.match(appJs, /netRetry/);
     assert.match(appJs, /modePacUnsupported/);
     assert.match(appJs, /updateConnectionDot/);
     assert.match(appJs, /detectBrowserLang/);
     assert.match(appJs, /navigator\.language/);
-    assert.match(appJs, /eventsParams\.set\("token", urlToken\)/);
+    assert.doesNotMatch(appJs, /\bEventSource\b/);
+    assert.match(appJs, /visibilityState/);
+    assert.match(appJs, /AbortController/);
+    assert.match(appJs, /X-Sidecar-Token/);
     assert.doesNotMatch(appJs, /\.cssText\s*=/);
 
     const stylesCss = readFileSync(
@@ -455,6 +461,283 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       assert.equal(zipCmd.code, 0, zipCmd.stderr || zipCmd.stdout);
       assert.equal(existsSync(join(zipExtract, "agent-status-monitor", "sidecars", "status-monitor", "server.mjs")), true);
       assert.equal(existsSync(join(zipExtract, "agent-status-monitor", "tests")), false);
+    });
+  });
+
+  it("app.js 真实对接 server.mjs 完成首屏拉取、预览告警切换、错误条保活、对话跟随与隐藏停轮询", async () => {
+    await withTempDir(async (dir) => {
+      const app = await createStatusServer({
+        configPath: join(dir, "config.json"),
+        serverInfoPath: join(dir, "server.json"),
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(dir, "hook-state.json"),
+        uiToken: "tok-ui-vm",
+        hookToken: "tok-hk-vm",
+        lsAddress: "",
+        sdkBridgeImpl: {
+          config: { conversationId: "conv-idle" },
+          getPreloadJs: () => "",
+          isSdkReady: () => false,
+          handleSidecarRoute: async () => ({ status: 404, data: {} }),
+        },
+        probePathsFn: async () => ({
+          proxyConfig: null,
+          direct: { ok: true, statusCode: 404, latencyMs: 12, mode: "direct", error: null },
+          proxy: null,
+        }),
+        inspectLsFn: async () => ({
+          running: true,
+          pids: ["777"],
+          lsPid: "777",
+          matchedByPort: true,
+          established443: 1,
+          synSent443: 0,
+          proxyConns: 0,
+          tunDetected: false,
+          localIps: [],
+          route: "direct",
+          healthz: { reachable: true, instanceId: "vm-e2e" },
+        }),
+        notifyFn: () => {},
+        disableSchedulers: true,
+        writeServerInfo: false,
+      });
+
+      const port = await app.listen(0, "127.0.0.1");
+      const now = Date.now();
+      app.store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: now - 3000,
+        payload: { conversationId: "conv-idle", terminationReason: "DONE" },
+      });
+      app.store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: now,
+        payload: { conversationId: "conv-busy", invocationNum: 5 },
+      });
+
+      const html = readFileSync(join(PLUGIN_ROOT, "sidecars/status-monitor/public/index.html"), "utf8");
+      const appJs = readFileSync(join(PLUGIN_ROOT, "sidecars/status-monitor/public/app.js"), "utf8");
+
+      const makeEl = (tag = "div") => {
+        const classes = new Set();
+        const attrs = new Map();
+        const listeners = new Map();
+        return {
+          tagName: tag.toUpperCase(),
+          textContent: "",
+          innerHTML: "",
+          value: "",
+          checked: false,
+          disabled: false,
+          title: "",
+          scrollTop: 0,
+          children: [],
+          dataset: {},
+          style: {
+            setProperty() {},
+            getPropertyValue() {
+              return "";
+            },
+          },
+          classList: {
+            add: (c) => classes.add(c),
+            remove: (c) => classes.delete(c),
+            contains: (c) => classes.has(c),
+            toggle: (c, force) => {
+              if (force === undefined) {
+                if (classes.has(c)) {
+                  classes.delete(c);
+                  return false;
+                }
+                classes.add(c);
+                return true;
+              }
+              if (force) classes.add(c);
+              else classes.delete(c);
+              return Boolean(force);
+            },
+          },
+          setAttribute: (k, v) => attrs.set(k, String(v)),
+          getAttribute: (k) => attrs.get(k) ?? null,
+          removeAttribute: (k) => attrs.delete(k),
+          appendChild: function (child) {
+            this.children.push(child);
+            return child;
+          },
+          append: function (...args) {
+            this.children.push(...args);
+          },
+          replaceChildren: function (frag) {
+            this.children = frag?.children ? [...frag.children] : [];
+          },
+          querySelector: () => null,
+          remove: () => {},
+          addEventListener: (type, fn) => {
+            if (!listeners.has(type)) listeners.set(type, []);
+            listeners.get(type).push(fn);
+          },
+          trigger: (type) => {
+            for (const fn of listeners.get(type) || []) fn({ type });
+          },
+        };
+      };
+
+      const elements = new Map();
+      for (const m of html.matchAll(/\bid="([^"]+)"/g)) {
+        elements.set(m[1], makeEl());
+      }
+      const docListeners = new Map();
+      const winListeners = new Map();
+      const sessionMap = new Map();
+      const localMap = new Map([["asm-lang", "zh"]]);
+      const fetchCalls = [];
+      let injectSimError = false;
+
+      const docObj = {
+        readyState: "complete",
+        visibilityState: "visible",
+        activeElement: null,
+        documentElement: makeEl("html"),
+        getElementById: (id) => elements.get(id) || null,
+        querySelectorAll: () => [],
+        createElement: (tag) => makeEl(tag),
+        createDocumentFragment: () => ({
+          children: [],
+          appendChild(c) {
+            this.children.push(c);
+            return c;
+          },
+        }),
+        addEventListener: (t, fn) => {
+          if (!docListeners.has(t)) docListeners.set(t, []);
+          docListeners.get(t).push(fn);
+        },
+        emit: (t) => {
+          for (const fn of docListeners.get(t) || []) fn({ type: t });
+        },
+      };
+
+      const winObj = {
+        location: { search: "?token=tok-ui-vm&conversationId=conv-idle" },
+        sidecar: {
+          conversationId: "conv-idle",
+          fetch: async (path, opts = {}) => {
+            fetchCalls.push({ method: opts.method || "GET", path });
+            if (injectSimError && path === "/api/simulate") {
+              injectSimError = false;
+              return {
+                ok: false,
+                status: 500,
+                json: async () => ({ ok: false, error: "simulated backend failure" }),
+              };
+            }
+            const headers = new Headers(opts.headers || {});
+            headers.set("Content-Type", "application/json");
+            headers.set("X-Sidecar-Token", "tok-ui-vm");
+            headers.set("Origin", "plugin://agent-status-monitor");
+            return globalThis.fetch(`http://127.0.0.1:${port}${path}`, { ...opts, headers });
+          },
+        },
+        addEventListener: (t, fn) => {
+          if (!winListeners.has(t)) winListeners.set(t, []);
+          winListeners.get(t).push(fn);
+        },
+        emit: (t) => {
+          for (const fn of winListeners.get(t) || []) fn({ type: t });
+        },
+        matchMedia: () => ({ matches: false, addEventListener() {} }),
+      };
+
+      const sandbox = {
+        window: winObj,
+        document: docObj,
+        navigator: { language: "zh-CN" },
+        localStorage: {
+          getItem: (k) => localMap.get(k) ?? null,
+          setItem: (k, v) => localMap.set(k, String(v)),
+        },
+        sessionStorage: {
+          getItem: (k) => sessionMap.get(k) ?? null,
+          setItem: (k, v) => sessionMap.set(k, String(v)),
+        },
+        Headers,
+        URLSearchParams,
+        AbortController,
+        MutationObserver: class {
+          observe() {}
+        },
+        BroadcastChannel: class {
+          postMessage() {}
+        },
+        getComputedStyle: () => ({ color: "rgb(0,0,0)" }),
+        setTimeout,
+        clearTimeout,
+        Date,
+      };
+      winObj.window = winObj;
+
+      const waitUntil = async (pred, timeoutMs = 3000) => {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          if (pred()) return;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        throw new Error("waitUntil timed out");
+      };
+
+      try {
+        runInNewContext(appJs, sandbox);
+
+        // 1. 首屏绑定当前空闲会话 conv-idle
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("IDLE"));
+        assert.match(elements.get("convBadge").textContent, /conv-idl/);
+        const selOpts = elements.get("convSelect").children.map((o) => o.value);
+        assert.ok(selOpts.includes("auto"));
+        assert.ok(selOpts.includes("conv-idle"));
+        assert.ok(selOpts.includes("conv-busy"));
+
+        // 2. 点击 #btnSim 开启预览告警 -> UI 切换告警 -> 再点击关闭 -> 恢复 IDLE
+        elements.get("btnSim").trigger("click");
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("ALERT"));
+        assert.equal(elements.get("btnSim").classList.contains("danger-active"), true);
+
+        elements.get("btnSim").trigger("click");
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("IDLE"));
+        assert.equal(elements.get("btnSim").classList.contains("danger-active"), false);
+
+        // 3. 操作失败提示显示在独立 #actionBanner，且后续 pollStatus/render 不冲掉它
+        injectSimError = true;
+        elements.get("btnSim").trigger("click");
+        await waitUntil(() => elements.get("actionBanner").classList.contains("visible"));
+        assert.match(elements.get("actionBanner").textContent, /simulated backend failure/);
+        docObj.visibilityState = "visible";
+        winObj.emit("focus");
+        await new Promise((r) => setTimeout(r, 120));
+        assert.equal(elements.get("actionBanner").classList.contains("visible"), true);
+
+        // 4. 在 #convSelect 切到 auto 自动跟随活跃会话 -> 立即显示正在跑的 conv-busy
+        elements.get("convSelect").value = "auto";
+        elements.get("convSelect").trigger("change");
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("WORKING"));
+        assert.match(elements.get("convBadge").textContent, /conv-bus/);
+
+        // 5. 切到隐藏页签后停止轮询请求，防止后台窗口耗尽 HTTP/1.1 6 连接池
+        docObj.visibilityState = "hidden";
+        docObj.emit("visibilitychange");
+        await new Promise((r) => setTimeout(r, 150));
+        const countWhenHidden = fetchCalls.length;
+        await new Promise((r) => setTimeout(r, 1300));
+        assert.equal(fetchCalls.length, countWhenHidden);
+
+        // 6. 切回可见时立刻恢复拉取
+        docObj.visibilityState = "visible";
+        docObj.emit("visibilitychange");
+        await waitUntil(() => fetchCalls.length > countWhenHidden);
+      } finally {
+        winObj.emit("pagehide");
+        await app.stop();
+      }
     });
   });
 });

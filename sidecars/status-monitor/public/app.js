@@ -19,7 +19,7 @@ const I18N = {
   zh: {
     htmlLang: "zh-CN",
     docTitle: "反重力实时状态监控",
-    sseDotTitle: "本地监控服务连接状态",
+    sseDotTitle: "本地监控服务连接状态（自适应短连接轮询）",
     brandTitle: "反重力实时状态监控",
     btnProbeTitle: "立即探测一次网络",
     btnProbe: "探测",
@@ -28,6 +28,13 @@ const I18N = {
     btnSimStop: "停止预览",
     btnSettingsTitle: "展开/收起设置",
     btnSettingsAria: "设置",
+    convSelectAria: "选择监控会话",
+    convAutoOpt: "自动跟随活跃",
+    convPinnedOpt: (id) => `本窗口 #${id.slice(0, 6)}`,
+    convItemOpt: (id, active) => `${active ? "● " : ""}#${id.slice(0, 8)}${active ? " (运行中)" : ""}`,
+    convActiveHint: (id) => `检测到活跃会话 #${id.slice(0, 8)}，可切换下拉框为“自动跟随活跃”`,
+    actionTimeout: "请求超时，请检查本地 Sidecar 服务状态",
+    actionFailedPrefix: "操作失败: ",
     initBadge: "初始化中",
     initHeadline: "正在连接本地监控探针…",
     initSummary: "正在读取 Hooks 状态、对话日志与网络探针。",
@@ -121,7 +128,7 @@ const I18N = {
   en: {
     htmlLang: "en",
     docTitle: "Antigravity Status Monitor",
-    sseDotTitle: "Local monitor connection status",
+    sseDotTitle: "Local monitor connection status (adaptive short polling)",
     brandTitle: "Status Monitor",
     btnProbeTitle: "Probe network now",
     btnProbe: "Probe",
@@ -130,6 +137,13 @@ const I18N = {
     btnSimStop: "Stop Alert",
     btnSettingsTitle: "Toggle settings",
     btnSettingsAria: "Settings",
+    convSelectAria: "Conversation scope",
+    convAutoOpt: "Auto (Active)",
+    convPinnedOpt: (id) => `This Tab #${id.slice(0, 6)}`,
+    convItemOpt: (id, active) => `${active ? "● " : ""}#${id.slice(0, 8)}${active ? " (Active)" : ""}`,
+    convActiveHint: (id) => `Active chat #${id.slice(0, 8)} detected — switch selector to Auto`,
+    actionTimeout: "Request timed out",
+    actionFailedPrefix: "Action failed: ",
     initBadge: "INIT",
     initHeadline: "Connecting to local monitor…",
     initSummary: "Reading Hooks, transcript logs & network probes.",
@@ -228,6 +242,7 @@ let lastSeverity = null;
 let lastSparkSig = "";
 let lastTimelineSig = "";
 let lastConfigSig = "";
+let lastConvOptsSig = "";
 let configuredTheme = "auto";
 function detectBrowserLang() {
   try {
@@ -273,7 +288,12 @@ function applyStaticI18n(lang) {
     const key = el.dataset.i18nOpt;
     if (d[key] != null) el.textContent = d[key];
   }
+  for (const el of document.querySelectorAll("[data-i18n-aria]")) {
+    const key = el.dataset.i18nAria;
+    if (d[key] != null) el.setAttribute("aria-label", d[key]);
+  }
 
+  lastConvOptsSig = "";
   $("btnSettings")?.setAttribute("aria-label", d.btnSettingsAria);
   setText("btnSimText", lastData?.simulation?.active ? d.btnSimStop : d.btnSimStart);
   $("alertStripLead").innerHTML = d.alertLeadHtml;
@@ -742,6 +762,13 @@ function render(data) {
 
   const convId = data.activeConversationId || hook.conversationId || transcript.conversationId;
   setText("convBadge", d.convLabel(convId));
+  syncConvSelect(data);
+  const otherActive = Array.isArray(data.recentConversations)
+    ? data.recentConversations.find((c) => c.active && c.id && c.id !== convId)
+    : null;
+  if ($("convBadge")) {
+    $("convBadge").title = otherActive ? d.convActiveHint(otherActive.id) : "";
+  }
 
   renderTimeline(events);
 
@@ -757,19 +784,75 @@ function render(data) {
   setText("lastRefresh", d.syncTime(fmtTime(data.now)));
 }
 
+const POLL_VISIBLE_INTERVAL_MS = 1000;
+const REQUEST_TIMEOUT_MS = 4500;
+const CONV_SCOPE_KEY = "asm-conv-scope";
+
 const urlParams = new URLSearchParams(window.location.search);
 const pageConvId = window.sidecar?.conversationId || urlParams.get("conversationId") || "";
 const urlToken = urlParams.get("token") || "";
-const statusParams = new URLSearchParams();
-if (pageConvId) statusParams.set("conversationId", pageConvId);
-const statusQuery = statusParams.toString();
-const statusEndpoint = statusQuery ? `/api/status?${statusQuery}` : "/api/status";
 
-const eventsParams = new URLSearchParams();
-if (pageConvId) eventsParams.set("conversationId", pageConvId);
-if (urlToken) eventsParams.set("token", urlToken);
-const eventsQuery = eventsParams.toString();
-const eventsEndpoint = eventsQuery ? `/api/events?${eventsQuery}` : "/api/events";
+function loadInitialConvScope() {
+  try {
+    const saved = sessionStorage.getItem(CONV_SCOPE_KEY);
+    if (saved) return saved;
+  } catch {
+  }
+  return pageConvId || "auto";
+}
+
+function persistConvScope(scope) {
+  try {
+    sessionStorage.setItem(CONV_SCOPE_KEY, scope);
+  } catch {
+  }
+}
+
+let selectedConvScope = loadInitialConvScope();
+
+function buildStatusEndpoint(scope = selectedConvScope) {
+  const statusParams = new URLSearchParams();
+  if (scope) statusParams.set("conversationId", scope);
+  const statusQuery = statusParams.toString();
+  return statusQuery ? `/api/status?${statusQuery}` : "/api/status";
+}
+
+function syncConvSelect(data) {
+  const sel = $("convSelect");
+  if (!sel) return;
+  const d = dict();
+  const recent = Array.isArray(data?.recentConversations) ? data.recentConversations : [];
+  const options = [{ value: "auto", label: d.convAutoOpt }];
+  const seen = new Set(["auto"]);
+
+  if (pageConvId && !seen.has(pageConvId)) {
+    seen.add(pageConvId);
+    options.push({ value: pageConvId, label: d.convPinnedOpt(pageConvId) });
+  }
+  for (const item of recent) {
+    if (!item?.id || seen.has(item.id)) continue;
+    seen.add(item.id);
+    options.push({ value: item.id, label: d.convItemOpt(item.id, Boolean(item.active)) });
+  }
+  if (selectedConvScope && !seen.has(selectedConvScope)) {
+    seen.add(selectedConvScope);
+    options.push({ value: selectedConvScope, label: d.convItemOpt(selectedConvScope, false) });
+  }
+
+  const sig = `${currentLang}|${selectedConvScope}|` + options.map((o) => `${o.value}:${o.label}`).join("|");
+  if (sig === lastConvOptsSig || document.activeElement === sel) return;
+  lastConvOptsSig = sig;
+
+  const frag = document.createDocumentFragment();
+  for (const opt of options) {
+    const el = document.createElement("option");
+    el.value = opt.value;
+    el.textContent = opt.label;
+    frag.appendChild(el);
+  }
+  sel.replaceChildren(frag);
+  sel.value = selectedConvScope;
+}
 
 function apiFetch(path, options = {}) {
   if (window.sidecar?.fetch) {
@@ -785,11 +868,46 @@ function apiFetch(path, options = {}) {
   return fetch(path, { cache: "no-store", ...options, headers });
 }
 
+async function fetchWithTimeout(path, options = {}, timeoutMs = REQUEST_TIMEOUT_MS) {
+  if (typeof AbortController !== "function") {
+    return apiFetch(path, options);
+  }
+  const controller = new AbortController();
+  let externalSignal = options.signal;
+  const onExternalAbort = () => controller.abort(externalSignal?.reason);
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort(externalSignal.reason);
+    } else {
+      externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error("timeout"));
+  }, timeoutMs);
+
+  try {
+    return await apiFetch(path, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (timedOut) {
+      throw new Error(dict().actionTimeout);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+    }
+  }
+}
+
 async function postJson(path, body = {}) {
-  const res = await apiFetch(path, {
+  const res = await fetchWithTimeout(path, {
     method: "POST",
     body: JSON.stringify(body),
-  });
+  }, 6000);
   if (!res.ok) {
     const errData = await res.json().catch(() => null);
     throw new Error(errData?.detail || errData?.error || `HTTP ${res.status}`);
@@ -797,103 +915,221 @@ async function postJson(path, body = {}) {
   return res.json();
 }
 
-let sseHealthy = false;
 let pollHealthy = false;
+let liveStarted = false;
+let pollStopped = false;
+let pollTimer = null;
+let pollInFlight = null;
+let pollAbortController = null;
+let actionBannerTimer = null;
+const syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("asm-status-sync") : null;
+
+function notifySiblingPanels() {
+  if (!syncChannel) return;
+  try {
+    syncChannel.postMessage({ type: "refresh", scope: selectedConvScope, ts: Date.now() });
+  } catch {
+  }
+}
 
 function updateConnectionDot() {
   const dot = $("sseDot");
   if (!dot) return;
-  dot.classList.toggle("offline", !sseHealthy && !pollHealthy);
+  dot.classList.toggle("offline", !pollHealthy);
 }
 
-async function pollStatus() {
-  try {
-    const res = await apiFetch(statusEndpoint, { method: "GET" });
-    if (!res.ok) {
-      if ((res.status === 401 || res.status === 403) && !lastData) {
-        const d = dict();
-        setText("verdictBadge", d.authDeniedBadge);
-        setText("verdictHeadline", d.authDeniedHeadline);
-        setText("verdictSummary", d.authDeniedSummary);
-      }
-      throw new Error(`HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    pollHealthy = true;
-    updateConnectionDot();
-    render(data);
-  } catch {
-    pollHealthy = false;
-    updateConnectionDot();
+function clearActionError() {
+  if (actionBannerTimer) {
+    clearTimeout(actionBannerTimer);
+    actionBannerTimer = null;
   }
-}
-
-let liveStarted = false;
-function startPolling() {
-  if (liveStarted) return;
-  liveStarted = true;
-
-  pollStatus();
-
-  if (typeof EventSource === "function") {
-    try {
-      const es = new EventSource(eventsEndpoint);
-      es.onopen = () => {
-        sseHealthy = true;
-        updateConnectionDot();
-      };
-      es.addEventListener("state", (ev) => {
-        sseHealthy = true;
-        updateConnectionDot();
-        try {
-          render(JSON.parse(ev.data));
-        } catch {
-        }
-      });
-      es.onerror = () => {
-        sseHealthy = false;
-        updateConnectionDot();
-      };
-    } catch {
-      sseHealthy = false;
-      updateConnectionDot();
-    }
-  }
-
-  const fallbackTick = async () => {
-    if (!sseHealthy) {
-      await pollStatus();
-    }
-    setTimeout(fallbackTick, 1500);
-  };
-  setTimeout(fallbackTick, 1500);
+  const banner = $("actionBanner");
+  if (!banner) return;
+  banner.textContent = "";
+  banner.classList.remove("visible");
 }
 
 function reportActionError(err) {
-  const prefix = currentLang === "en" ? "Action failed: " : "操作失败: ";
-  setText("verdictSummary", `${prefix}${err?.message || "unknown"}`);
+  const prefix = dict().actionFailedPrefix;
+  const msg = `${prefix}${err?.message || "unknown"}`;
+  const banner = $("actionBanner");
+  if (banner) {
+    banner.textContent = msg;
+    banner.classList.add("visible");
+    if (actionBannerTimer) clearTimeout(actionBannerTimer);
+    actionBannerTimer = setTimeout(() => clearActionError(), 6000);
+    return;
+  }
+  setText("verdictSummary", msg);
 }
 
-$("btnProbe").addEventListener("click", async () => {
-  const btn = $("btnProbe");
+async function pollStatus({ manual = false } = {}) {
+  if (pollStopped) return null;
+  if (pollInFlight) {
+    if (!manual) return pollInFlight;
+    if (pollAbortController) {
+      try {
+        pollAbortController.abort(new Error("superseded"));
+      } catch {
+      }
+    }
+  }
+
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  pollAbortController = controller;
+  const endpoint = buildStatusEndpoint(selectedConvScope);
+
+  const task = (async () => {
+    try {
+      const res = await fetchWithTimeout(endpoint, {
+        method: "GET",
+        signal: controller?.signal,
+      });
+      if (!res.ok) {
+        if ((res.status === 401 || res.status === 403) && !lastData) {
+          const d = dict();
+          setText("verdictBadge", d.authDeniedBadge);
+          setText("verdictHeadline", d.authDeniedHeadline);
+          setText("verdictSummary", d.authDeniedSummary);
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      if (controller?.signal?.aborted || pollAbortController !== controller) {
+        return data;
+      }
+      pollHealthy = true;
+      updateConnectionDot();
+      render(data);
+      return data;
+    } catch (err) {
+      if (controller?.signal?.aborted && pollAbortController !== controller) {
+        return null;
+      }
+      pollHealthy = false;
+      updateConnectionDot();
+      return null;
+    } finally {
+      if (pollAbortController === controller) {
+        pollAbortController = null;
+      }
+      if (pollInFlight === task) {
+        pollInFlight = null;
+      }
+    }
+  })();
+
+  pollInFlight = task;
+  return task;
+}
+
+function clearPollTimer() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function scheduleNextPoll() {
+  clearPollTimer();
+  if (pollStopped || document.visibilityState === "hidden") {
+    return;
+  }
+  pollTimer = setTimeout(async () => {
+    pollTimer = null;
+    await pollStatus();
+    scheduleNextPoll();
+  }, POLL_VISIBLE_INTERVAL_MS);
+}
+
+function stopPolling() {
+  pollStopped = true;
+  clearPollTimer();
+  if (pollAbortController) {
+    try {
+      pollAbortController.abort(new Error("unload"));
+    } catch {
+    }
+    pollAbortController = null;
+  }
+}
+
+function startPolling() {
+  if (liveStarted) return;
+  liveStarted = true;
+  pollStopped = false;
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      clearPollTimer();
+    } else if (!pollStopped) {
+      clearPollTimer();
+      pollStatus({ manual: true }).finally(() => scheduleNextPoll());
+    }
+  });
+  window.addEventListener("focus", () => {
+    if (!pollStopped && document.visibilityState !== "hidden") {
+      clearPollTimer();
+      pollStatus({ manual: true }).finally(() => scheduleNextPoll());
+    }
+  });
+  window.addEventListener("pagehide", stopPolling);
+  window.addEventListener("beforeunload", stopPolling);
+
+  if (syncChannel) {
+    syncChannel.onmessage = () => {
+      if (!pollStopped && document.visibilityState !== "hidden") {
+        clearPollTimer();
+        pollStatus({ manual: true }).finally(() => scheduleNextPoll());
+      }
+    };
+  }
+
+  pollStatus({ manual: true }).finally(() => scheduleNextPoll());
+}
+
+async function runActionButton(btn, actionFn, { activeDurationMs = 0 } = {}) {
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  btn.setAttribute("aria-busy", "true");
   btn.classList.add("active");
   try {
-    await postJson("/api/probe");
-    await pollStatus();
+    clearActionError();
+    await actionFn();
+    await pollStatus({ manual: true });
+    notifySiblingPanels();
+    scheduleNextPoll();
   } catch (err) {
     reportActionError(err);
   } finally {
-    setTimeout(() => btn.classList.remove("active"), 350);
+    btn.disabled = false;
+    btn.removeAttribute("aria-busy");
+    if (activeDurationMs > 0) {
+      setTimeout(() => btn.classList.remove("active"), activeDurationMs);
+    } else {
+      btn.classList.remove("active");
+    }
   }
+}
+
+$("btnProbe").addEventListener("click", () => {
+  runActionButton($("btnProbe"), () => postJson("/api/probe"), { activeDurationMs: 350 });
 });
 
-$("btnSim").addEventListener("click", async () => {
-  try {
-    await postJson("/api/simulate", {});
-    await pollStatus();
-  } catch (err) {
-    reportActionError(err);
-  }
+$("btnSim").addEventListener("click", () => {
+  const nextActive = !Boolean(lastData?.simulation?.active);
+  runActionButton($("btnSim"), () => postJson("/api/simulate", { active: nextActive }));
+});
+
+$("convSelect").addEventListener("change", () => {
+  const next = $("convSelect").value || "auto";
+  selectedConvScope = next;
+  persistConvScope(next);
+  lastConvOptsSig = "";
+  lastTimelineSig = "";
+  clearActionError();
+  clearPollTimer();
+  pollStatus({ manual: true }).finally(() => scheduleNextPoll());
 });
 
 $("btnSettings").addEventListener("click", () => {
@@ -916,9 +1152,12 @@ async function switchLang(nextLang) {
     render(lastData);
   }
   try {
+    clearActionError();
     await postJson("/api/config", { lang: nextLang });
     showCfgError("");
-    await pollStatus();
+    await pollStatus({ manual: true });
+    notifySiblingPanels();
+    scheduleNextPoll();
   } catch (err) {
     reportActionError(err);
   } finally {
@@ -931,6 +1170,7 @@ $("btnLangEn").addEventListener("click", () => switchLang("en"));
 
 const saveCfg = async () => {
   showCfgError("");
+  clearActionError();
   const nextTheme = $("cfgTheme").value;
   const nextProbeUrl = $("cfgProbeUrl").value.trim();
   const nextManualProxy = $("cfgManualProxy").value.trim();
@@ -953,7 +1193,9 @@ const saveCfg = async () => {
     if (manualProxyChanged || probeUrlChanged) {
       await postJson("/api/probe");
     }
-    await pollStatus();
+    await pollStatus({ manual: true });
+    notifySiblingPanels();
+    scheduleNextPoll();
   } catch (err) {
     showCfgError(err?.message || "Invalid config");
     reportActionError(err);

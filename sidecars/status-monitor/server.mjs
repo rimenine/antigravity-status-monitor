@@ -175,14 +175,53 @@ export async function createStatusServer({
   let lsEndpointsPid = null;
   let pacNotifiedUrl = null;
   let lastRequestedConvId = null;
+  const recentRequestedConvs = new Map();
   const lastSseStateByConv = new Map();
 
+  function recordRequestedConv(convId) {
+    if (!convId || convId === "auto") return;
+    const now = Date.now();
+    recentRequestedConvs.set(convId, now);
+    if (recentRequestedConvs.size > 32) {
+      for (const [k, ts] of recentRequestedConvs.entries()) {
+        if (now - ts > 60_000) recentRequestedConvs.delete(k);
+      }
+    }
+  }
+
+  function getPinnedConvIds(now = Date.now()) {
+    const pinnedConvIds = new Set();
+    if (sdkBridge.config.conversationId) pinnedConvIds.add(sdkBridge.config.conversationId);
+    for (const cid of sseClients.values()) {
+      if (cid && cid !== "auto") pinnedConvIds.add(cid);
+    }
+    for (const [cid, ts] of recentRequestedConvs.entries()) {
+      if (now - ts <= 60_000) {
+        pinnedConvIds.add(cid);
+      } else {
+        recentRequestedConvs.delete(cid);
+      }
+    }
+    return pinnedConvIds;
+  }
+
+  function detachSseClient(res, destroy = false) {
+    sseClients.delete(res);
+    if (destroy) {
+      try {
+        if (!res.destroyed) res.destroy();
+      } catch {
+      }
+    }
+  }
+
   function getPreferredConvId() {
+    if (lastRequestedConvId && lastRequestedConvId !== "auto") return lastRequestedConvId;
     if (sdkBridge.config.conversationId) return sdkBridge.config.conversationId;
     for (const cid of sseClients.values()) {
-      if (cid) return cid;
+      if (cid && cid !== "auto") return cid;
     }
-    return lastRequestedConvId || null;
+    return null;
   }
 
   function restoreNotifyStateAfterSim() {
@@ -199,7 +238,8 @@ export async function createStatusServer({
   }
 
   function getSnapshot(requestedConvId = null) {
-    const effectiveConvId = requestedConvId || sdkBridge.config.conversationId || null;
+    const isAuto = requestedConvId === "auto";
+    const effectiveConvId = isAuto ? null : requestedConvId || sdkBridge.config.conversationId || null;
     const snap = store.buildSnapshot({
       probes: runtime.probes,
       consecutiveFailures: runtime.consecutiveFailures,
@@ -233,6 +273,10 @@ export async function createStatusServer({
     const activeKeys = new Set();
 
     for (const [res, convId] of sseClients.entries()) {
+      if (res.writableEnded || res.destroyed) {
+        detachSseClient(res);
+        continue;
+      }
       const key = convId || "";
       activeKeys.add(key);
       let entry = frameByConv.get(key);
@@ -253,7 +297,7 @@ export async function createStatusServer({
       try {
         res.write(entry.payload);
       } catch {
-        sseClients.delete(res);
+        detachSseClient(res, true);
       }
     }
 
@@ -591,36 +635,55 @@ export async function createStatusServer({
       }
     }
 
-    if (req.method === "GET" && url.pathname === "/api/status") {
+    if (req.method === "GET" && (url.pathname === "/api/status" || url.pathname === "/api/events")) {
       const requestedConvId = url.searchParams.get("conversationId")?.trim() || null;
-      if (requestedConvId) lastRequestedConvId = requestedConvId;
-      store.refreshTranscript(requestedConvId || sdkBridge.config.conversationId || null, true);
-      sendJson(res, 200, {
-        ...getSnapshot(requestedConvId),
-        security: {
-          uiTokenEnforced: security.hasUiToken,
-          sdkReady: sdkBridge.isSdkReady(),
-        },
-      });
-      return;
-    }
+      const isAuto = requestedConvId === "auto";
+      const recordTimeline = url.pathname === "/api/status";
+      if (isAuto) {
+        lastRequestedConvId = null;
+        store.loadFallbackHookIfNewer();
+        store.scanTranscript(getPinnedConvIds(), recordTimeline, { fullScanIntervalMs: 2500 });
+      } else {
+        if (requestedConvId) {
+          lastRequestedConvId = requestedConvId;
+          recordRequestedConv(requestedConvId);
+        }
+        store.refreshTranscript(requestedConvId || sdkBridge.config.conversationId || null, recordTimeline);
+      }
 
-    if (req.method === "GET" && url.pathname === "/api/events") {
-      const requestedConvId = url.searchParams.get("conversationId")?.trim() || null;
-      if (requestedConvId) lastRequestedConvId = requestedConvId;
-      store.refreshTranscript(requestedConvId || sdkBridge.config.conversationId || null, false);
+      if (url.pathname === "/api/status") {
+        sendJson(res, 200, {
+          ...getSnapshot(requestedConvId),
+          security: {
+            uiTokenEnforced: security.hasUiToken,
+            sdkReady: sdkBridge.isSdkReady(),
+          },
+        });
+        return;
+      }
+
       res.writeHead(200, {
         ...BASE_SECURITY_HEADERS,
         "Content-Type": "text/event-stream; charset=utf-8",
         "Cache-Control": "no-cache, no-transform",
         Connection: "keep-alive",
       });
+      const cleanup = () => detachSseClient(res);
+      req.on("close", cleanup);
+      req.on("aborted", cleanup);
+      res.on("close", cleanup);
+      res.on("error", cleanup);
       const initSnap = getSnapshot(requestedConvId);
-      const initKey = requestedConvId || "";
+      const initKey = isAuto ? "" : requestedConvId || "";
       lastSseStateByConv.set(initKey, { diffKey: buildSseDiffKey(initSnap), sentAt: Date.now() });
-      res.write(`event: state\ndata: ${JSON.stringify(initSnap)}\n\n`);
-      sseClients.set(res, requestedConvId);
-      req.on("close", () => sseClients.delete(res));
+      try {
+        res.write(`event: state\ndata: ${JSON.stringify(initSnap)}\n\n`);
+        if (!res.writableEnded && !res.destroyed) {
+          sseClients.set(res, isAuto ? null : requestedConvId);
+        }
+      } catch {
+        detachSseClient(res, true);
+      }
       return;
     }
 
@@ -791,11 +854,7 @@ export async function createStatusServer({
           resetProbeScheduler();
           timers.push(
             setInterval(() => {
-              const pinnedConvIds = new Set();
-              if (sdkBridge.config.conversationId) pinnedConvIds.add(sdkBridge.config.conversationId);
-              for (const cid of sseClients.values()) {
-                if (cid) pinnedConvIds.add(cid);
-              }
+              const pinnedConvIds = getPinnedConvIds();
               if (store.scanTranscript(pinnedConvIds, true, { fullScanIntervalMs: 4500 })) {
                 broadcastState({ force: true });
               }
@@ -844,6 +903,7 @@ export async function createStatusServer({
     cleanupServerFile,
     runLsInspection,
     runProbeOnce,
+    getSseClientCount: () => sseClients.size,
   };
 }
 

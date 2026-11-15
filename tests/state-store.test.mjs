@@ -464,4 +464,73 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       assert.equal(existsSync(fileB), true);
     });
   });
+
+  it("auto 模式在当前会话空闲后切换到另一活跃会话，并输出 recentConversations 排序列表", async () => {
+    await withTempDir(async (dir) => {
+      const store = createStateStore({
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(dir, "hook-state.json"),
+      });
+      const t0 = Date.now();
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: t0 - 6000,
+        payload: { conversationId: "conv-a", invocationNum: 1 },
+      });
+      store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: t0 - 4000,
+        payload: { conversationId: "conv-a", terminationReason: "DONE" },
+      });
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: t0 - 1000,
+        payload: { conversationId: "conv-b", invocationNum: 2 },
+      });
+      store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: t0 - 500,
+        payload: { conversationId: "conv-b", terminationReason: "DONE" },
+      });
+      // conv-b 为 latestConvId 但已 Stop 空闲；重新让 conv-a 开始运行后，auto 应跟随回 conv-a
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: t0,
+        payload: { conversationId: "conv-a", invocationNum: 2 },
+      });
+      store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: t0 + 100,
+        payload: { conversationId: "conv-a", terminationReason: "DONE" },
+      });
+      // conv-b 处于活跃工作中，随后 conv-a 触发 Stop 导致 latestConvId 停留在空闲的 conv-a
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: t0 + 200,
+        payload: { conversationId: "conv-b", invocationNum: 3 },
+      });
+      store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: t0 + 300,
+        payload: { conversationId: "conv-a", terminationReason: "DONE" },
+      });
+
+      const resolvedAuto = store.resolveActiveConversation("auto");
+      assert.equal(resolvedAuto.hook.conversationId, "conv-b");
+
+      const snap = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 50 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25 },
+        requestedConvId: "auto",
+      });
+      assert.equal(snap.activeConversationId, "conv-b");
+      assert.equal(snap.recentConversations[0].id, "conv-b");
+      assert.equal(snap.recentConversations[0].active, true);
+      assert.equal(snap.recentConversations[1].id, "conv-a");
+      assert.equal(snap.recentConversations[1].active, false);
+    });
+  });
 });
