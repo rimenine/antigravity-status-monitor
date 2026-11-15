@@ -70,6 +70,9 @@ export function createSseHub({ getSnapshot, getSdkConvId = () => null } = {}) {
         ? {
             ...snap.verdict,
             silentSec: snap.verdict.silentSec == null ? null : Math.floor(snap.verdict.silentSec / 5),
+            hookAgeSec: snap.verdict.hookAgeSec == null ? null : Math.floor(snap.verdict.hookAgeSec / 5),
+            activityAgeSec:
+              snap.verdict.activityAgeSec == null ? null : Math.floor(snap.verdict.activityAgeSec / 5),
           }
         : snap.verdict;
     return JSON.stringify({

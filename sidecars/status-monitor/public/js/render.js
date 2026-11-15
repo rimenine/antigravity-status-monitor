@@ -215,46 +215,6 @@
     $("cfgNotify").checked = Boolean(config.notifyOnDisconnect);
   }
 
-  function syncConvSelect(data, pageConvId, selectedConvScope) {
-    const { $, state, i18n } = ns;
-    const sel = $("convSelect");
-    if (!sel) return;
-    const d = i18n.dict();
-    const recent = Array.isArray(data?.recentConversations) ? data.recentConversations : [];
-    const options = [{ value: "auto", label: d.convAutoOpt }];
-    const seen = new Set(["auto"]);
-
-    if (pageConvId && !seen.has(pageConvId)) {
-      seen.add(pageConvId);
-      options.push({ value: pageConvId, label: d.convPinnedOpt(pageConvId) });
-    }
-    for (const item of recent) {
-      if (!item?.id || seen.has(item.id)) continue;
-      seen.add(item.id);
-      options.push({ value: item.id, label: d.convItemOpt(item.id, Boolean(item.active)) });
-    }
-    if (selectedConvScope && !seen.has(selectedConvScope)) {
-      seen.add(selectedConvScope);
-      options.push({ value: selectedConvScope, label: d.convItemOpt(selectedConvScope, false) });
-    }
-
-    const sig =
-      `${state.currentLang}|${selectedConvScope}|` +
-      options.map((o) => `${o.value}:${o.label}`).join("|");
-    if (sig === state.lastConvOptsSig || document.activeElement === sel) return;
-    state.lastConvOptsSig = sig;
-
-    const frag = document.createDocumentFragment();
-    for (const opt of options) {
-      const el = document.createElement("option");
-      el.value = opt.value;
-      el.textContent = opt.label;
-      frag.appendChild(el);
-    }
-    sel.replaceChildren(frag);
-    sel.value = selectedConvScope;
-  }
-
   function renderHeroAndProbe(data, d) {
     const { $, state, format, ICONS, GLOW_COLORS } = ns;
     const { verdict, simulation, metrics, probes } = data;
@@ -293,8 +253,17 @@
     );
     const stepNum = transcript.latestStepIndex ?? hook.stepIdx;
     format.setText("agentStepVal", stepNum != null ? `Step #${stepNum}` : d.waitActivity);
+    // 若最近 Hook 事件（如 PreInvocation）比旧对话日志更新，则优先展示 Hook 距今秒数，避免显示“PreInvocation · 120s 前写入”
+    const hasHookAge = hook.lastEvent && verdict.hookAgeSec != null;
+    const useHookAge =
+      hasHookAge && (verdict.silentSec == null || verdict.hookAgeSec <= verdict.silentSec);
     const silentText = verdict.silentSec != null ? d.secAgo(verdict.silentSec) : d.noLog;
-    format.setText("agentLogAge", hook.lastEvent ? `${hook.lastEvent} · ${silentText}` : silentText);
+    const heartbeatText = hook.lastEvent
+      ? useHookAge
+        ? `${hook.lastEvent} · ${d.hookAgo(verdict.hookAgeSec)}`
+        : `${hook.lastEvent} · ${silentText}`
+      : silentText;
+    format.setText("agentLogAge", heartbeatText);
 
     const proxyCfg = latestProbe?.proxyConfig || data.proxyConfig;
     const isPacUnsupported = String(proxyCfg?.source || "").endsWith("pac-unsupported");
@@ -414,7 +383,7 @@
     );
   }
 
-  function render(data, { pageConvId = "", selectedConvScope = "auto" } = {}) {
+  function render(data) {
     const { $, state, i18n, format } = ns;
     state.lastData = data;
     const { config, hook, transcript, events } = data;
@@ -436,12 +405,8 @@
 
     const convId = data.activeConversationId || hook.conversationId || transcript.conversationId;
     format.setText("convBadge", d.convLabel(convId));
-    syncConvSelect(data, pageConvId, selectedConvScope);
-    const otherActive = Array.isArray(data.recentConversations)
-      ? data.recentConversations.find((c) => c.active && c.id && c.id !== convId)
-      : null;
     if ($("convBadge")) {
-      $("convBadge").title = otherActive ? d.convActiveHint(otherActive.id) : "";
+      $("convBadge").title = "";
     }
 
     renderTimeline(events);
@@ -454,6 +419,5 @@
     renderTimeline,
     showCfgError,
     syncSettings,
-    syncConvSelect,
   };
 })(globalThis.AsmUI = globalThis.AsmUI || {});

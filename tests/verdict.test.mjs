@@ -345,4 +345,39 @@ describe("computeVerdict（核心状态诊断引擎）", () => {
     assert.equal(afterNewTurn.code, "WAITING_LLM");
     assert.equal(afterNewTurn.source, "transcript");
   });
+
+  it("近期 PreInvocation 后不应沿用旧日志时间误报 120s 无响应，卡顿阈值以最新活动为准", () => {
+    const baseNow = 1_700_000_000_000;
+    const stallVerdict = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: baseNow - 30_000 },
+      transcript: { latestStepAt: baseNow - 120_000, inferredPhase: "idle" },
+      ls: { running: true, healthz: { reachable: true } },
+      probes: [{ ok: true, latencyMs: 60 }],
+      consecutiveFailures: 0,
+      config: { stallThresholdSec: 25, lang: "zh" },
+      now: baseNow,
+    });
+    assert.equal(stallVerdict.code, "SUSPECT_STALL");
+    assert.equal(stallVerdict.messageKey, "MODEL_STALL");
+    assert.equal(stallVerdict.elapsedSec, 30);
+    assert.equal(stallVerdict.hookAgeSec, 30);
+    assert.equal(stallVerdict.silentSec, 120);
+    assert.equal(stallVerdict.messageParams.silentSec, 30);
+    assert.match(stallVerdict.summary, /30s/);
+    assert.doesNotMatch(stallVerdict.summary, /120s/);
+
+    const freshVerdict = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: baseNow - 5_000 },
+      transcript: { latestStepAt: baseNow - 120_000, inferredPhase: "idle" },
+      ls: { running: true, healthz: { reachable: true } },
+      probes: [{ ok: true, latencyMs: 60 }],
+      consecutiveFailures: 0,
+      config: { stallThresholdSec: 25, lang: "zh" },
+      now: baseNow,
+    });
+    assert.equal(freshVerdict.code, "WAITING_LLM");
+    assert.equal(freshVerdict.elapsedSec, 5);
+    assert.equal(freshVerdict.hookAgeSec, 5);
+    assert.equal(freshVerdict.activityAgeSec, 5);
+  });
 });

@@ -127,9 +127,12 @@ export async function createStatusServer({
     const requestedConvId = url.searchParams.get("conversationId")?.trim() || null;
     const isAuto = requestedConvId === "auto";
     const recordTimeline = url.pathname === "/api/status";
-    if (isAuto) {
-      sseHub.clearLastRequestedConv();
-      store.loadFallbackHookIfNewer();
+    // 无论固定单窗口还是自动模式，都优先吸收降级 Hook 文件（防止启动期 / 重启竞态漏事件）
+    store.loadFallbackHookIfNewer();
+    if (isAuto || (!requestedConvId && !sdkBridge.config.conversationId)) {
+      if (isAuto) {
+        sseHub.clearLastRequestedConv();
+      }
       store.scanTranscript(sseHub.getPinnedConvIds(), recordTimeline, { fullScanIntervalMs: 2500 });
     } else {
       if (requestedConvId) {

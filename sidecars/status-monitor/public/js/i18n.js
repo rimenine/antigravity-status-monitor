@@ -31,11 +31,6 @@
       btnSimStop: "停止预览",
       btnSettingsTitle: "展开/收起设置",
       btnSettingsAria: "设置",
-      convSelectAria: "选择监控会话",
-      convAutoOpt: "自动跟随活跃",
-      convPinnedOpt: (id) => `本窗口 #${id.slice(0, 6)}`,
-      convItemOpt: (id, active) => `${active ? "● " : ""}#${id.slice(0, 8)}${active ? " (运行中)" : ""}`,
-      convActiveHint: (id) => `检测到活跃会话 #${id.slice(0, 8)}，可切换下拉框为“自动跟随活跃”`,
       actionTimeout: "请求超时，请检查本地 Sidecar 服务状态",
       actionFailedPrefix: "操作失败: ",
       initBadge: "初始化中",
@@ -102,6 +97,7 @@
       srcLog: "日志",
       srcWait: "等待",
       waitActivity: "等待活动",
+      hookAgo: (s) => `${s}s 前`,
       secAgo: (s) => `${s}s 前写入`,
       noLog: "暂无日志",
       modeProxy: (addr) => `代理 ${addr}`,
@@ -140,11 +136,6 @@
       btnSimStop: "Stop Alert",
       btnSettingsTitle: "Toggle settings",
       btnSettingsAria: "Settings",
-      convSelectAria: "Conversation scope",
-      convAutoOpt: "Auto (Active)",
-      convPinnedOpt: (id) => `This Tab #${id.slice(0, 6)}`,
-      convItemOpt: (id, active) => `${active ? "● " : ""}#${id.slice(0, 8)}${active ? " (Active)" : ""}`,
-      convActiveHint: (id) => `Active chat #${id.slice(0, 8)} detected — switch selector to Auto`,
       actionTimeout: "Request timed out",
       actionFailedPrefix: "Action failed: ",
       initBadge: "INIT",
@@ -211,6 +202,7 @@
       srcLog: "Log",
       srcWait: "Wait",
       waitActivity: "Waiting",
+      hookAgo: (s) => `${s}s ago`,
       secAgo: (s) => `${s}s ago`,
       noLog: "No logs yet",
       modeProxy: (addr) => `Proxy ${addr}`,
@@ -257,7 +249,6 @@
     lastSparkSig: "",
     lastTimelineSig: "",
     lastConfigSig: "",
-    lastConvOptsSig: "",
     configuredTheme: "auto",
     hasCfgError: false,
   };
@@ -290,7 +281,6 @@
       if (d[key] != null) el.setAttribute("aria-label", d[key]);
     }
 
-    ns.state.lastConvOptsSig = "";
     $("btnSettings")?.setAttribute("aria-label", d.btnSettingsAria);
     format.setText("btnSimText", ns.state.lastData?.simulation?.active ? d.btnSimStop : d.btnSimStart);
     $("alertStripLead").innerHTML = d.alertLeadHtml;

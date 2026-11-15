@@ -227,6 +227,9 @@ export function createStateStore({
 
   function refreshTranscript(convId, recordTimeline = true) {
     if (!convId) return false;
+    if (!latestConvId) {
+      latestConvId = convId;
+    }
     try {
       const p = findTranscriptPathForConv(convId);
       return p ? parseTranscriptFile(convId, p, recordTimeline) : false;
@@ -431,6 +434,19 @@ export function createStateStore({
     });
     const tokenStats = collectTokenStats(brainDirs, conv.transcript.filePath);
 
+    const activeConversationId =
+      conv.hook.conversationId || conv.transcript.conversationId || effectiveReqId || null;
+    // 仅保留当前绑定窗口与全局事件（无 conversationId），避免其他并行对话的调用记录混入本窗口事件流
+    const scopedEvents = events
+      .filter(
+        (ev) =>
+          !ev.conversationId ||
+          !activeConversationId ||
+          activeConversationId === "default" ||
+          ev.conversationId === activeConversationId,
+      )
+      .map((ev) => resolveEventText(ev, config?.lang || "zh"));
+
     const okProbes = probes.filter((p) => p.ok);
     const avgLatencyMs = okProbes.length
       ? Math.round(okProbes.reduce((acc, p) => acc + p.latencyMs, 0) / okProbes.length)
@@ -441,7 +457,7 @@ export function createStateStore({
 
     return {
       now,
-      activeConversationId: conv.hook.conversationId || conv.transcript.conversationId || effectiveReqId || null,
+      activeConversationId,
       verdict,
       config,
       hook: conv.hook,
@@ -457,7 +473,7 @@ export function createStateStore({
       },
       simulation,
       recentConversations: listRecentConversations(now),
-      events: events.map((ev) => resolveEventText(ev, config?.lang || "zh")),
+      events: scopedEvents,
     };
   }
 

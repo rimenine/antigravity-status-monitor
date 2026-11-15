@@ -600,20 +600,7 @@ button.icon-btn {
   flex-wrap: wrap;
   margin-bottom: 8px;
 }
-.timeline-meta {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-.conv-select {
-  max-width: 175px;
-  min-width: 0;
-  padding: 2px 6px;
-  font-size: 11px;
-  border-radius: 6px;
-  font-family: var(--mon-font-mono);
-}
+/* 移除了手动切换窗口下拉框样式 */
 .timeline-list {
   display: flex;
   flex-direction: column;

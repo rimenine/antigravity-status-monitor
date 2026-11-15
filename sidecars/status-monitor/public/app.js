@@ -5,7 +5,7 @@
   i18n.applyStaticI18n(state.currentLang);
 
   const client = createClient({
-    onRender: (data, convScope) => render.render(data, convScope),
+    onRender: (data) => render.render(data),
   });
 
   async function runActionButton(btn, actionFn, { activeDurationMs = 0 } = {}) {
@@ -41,16 +41,6 @@
     runActionButton($("btnSim"), () => client.postJson("/api/simulate", { active: nextActive }));
   });
 
-  $("convSelect").addEventListener("change", () => {
-    const next = $("convSelect").value || "auto";
-    client.setSelectedConvScope(next);
-    state.lastConvOptsSig = "";
-    state.lastTimelineSig = "";
-    client.clearActionError();
-    client.clearPollTimer();
-    client.pollStatus({ manual: true }).finally(() => client.scheduleNextPoll());
-  });
-
   $("btnSettings").addEventListener("click", () => {
     const open = $("settingsPanel").classList.toggle("open");
     $("btnSettings").classList.toggle("active", open);
@@ -68,7 +58,7 @@
     state.lastConfigSig = "";
     i18n.applyStaticI18n(nextLang);
     if (state.lastData) {
-      render.render(state.lastData, client.getConvScope());
+      render.render(state.lastData);
     }
     try {
       client.clearActionError();

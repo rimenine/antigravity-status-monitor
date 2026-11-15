@@ -26,7 +26,7 @@ const VERDICT_COPY = {
     }),
     MODEL_STALL: ({ silentSec }) => ({
       headline: "响应较慢 · 疑似模型端卡顿",
-      summary: `网络探针正常，但已 ${silentSec}s 无新日志写入，模型可能正在深度思考或排队超时。`,
+      summary: `网络探针正常，但已 ${silentSec}s 无新响应或日志写入，模型可能正在深度思考或排队超时。`,
     }),
     WAITING_LLM: ({ elapsedSec }) => ({
       headline: "真实工作中 · 等待模型响应",
@@ -71,7 +71,7 @@ const VERDICT_COPY = {
     }),
     MODEL_STALL: ({ silentSec }) => ({
       headline: "Slow Response · Possible Model Stall",
-      summary: `Network probes pass, but no log output arrived for ${silentSec}s. The model may be thinking or queued.`,
+      summary: `Network probes pass, but no response or log update arrived for ${silentSec}s. The model may be thinking or queued.`,
     }),
     WAITING_LLM: ({ elapsedSec }) => ({
       headline: "Working · Waiting for Model Response",

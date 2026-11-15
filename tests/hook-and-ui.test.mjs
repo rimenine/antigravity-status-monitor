@@ -239,7 +239,8 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.doesNotMatch(html, /\bstyle\s*=|<style\b/i);
     assert.doesNotMatch(html, /var\(--(accent|ok|tool)\)/);
     assert.ok(htmlIds.has("btnLangZh") && htmlIds.has("btnLangEn"));
-    assert.ok(htmlIds.has("actionBanner") && htmlIds.has("convSelect"));
+    assert.ok(htmlIds.has("actionBanner") && htmlIds.has("convBadge"));
+    assert.equal(htmlIds.has("convSelect"), false);
     assert.match(frontendCode, /netRetry/);
     assert.match(frontendCode, /modePacUnsupported/);
     assert.match(frontendCode, /updateConnectionDot/);
@@ -706,13 +707,10 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
           runInContext(mod.code, vmContext, { filename: mod.filename });
         }
 
-        // 1. 首屏绑定当前空闲会话 conv-idle
+        // 1. 首屏严格绑定宿主当前空闲会话 conv-idle（不提供手动切换器，也不会主动拉取 conversationId=auto）
         await waitUntil(() => elements.get("verdictBadge").textContent.includes("IDLE"));
         assert.match(elements.get("convBadge").textContent, /conv-idl/);
-        const selOpts = elements.get("convSelect").children.map((o) => o.value);
-        assert.ok(selOpts.includes("auto"));
-        assert.ok(selOpts.includes("conv-idle"));
-        assert.ok(selOpts.includes("conv-busy"));
+        assert.equal(fetchCalls.some((u) => String(u).includes("conversationId=auto")), false);
 
         // 2. 点击 #btnSim 开启预览告警 -> UI 切换告警 -> 再点击关闭 -> 恢复 IDLE
         elements.get("btnSim").trigger("click");
@@ -733,11 +731,14 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         await new Promise((r) => setTimeout(r, 120));
         assert.equal(elements.get("actionBanner").classList.contains("visible"), true);
 
-        // 4. 在 #convSelect 切到 auto 自动跟随活跃会话 -> 立即显示正在跑的 conv-busy
-        elements.get("convSelect").value = "auto";
-        elements.get("convSelect").trigger("change");
+        // 4. 仅当宿主窗口（sidecar.conversationId）切换为 conv-busy 时，面板才随用户切换并显示 PreInvocation 真实距今秒数
+        winObj.sidecar.conversationId = "conv-busy";
+        winObj.emit("focus");
         await waitUntil(() => elements.get("verdictBadge").textContent.includes("WORKING"));
         assert.match(elements.get("convBadge").textContent, /conv-bus/);
+        assert.match(elements.get("agentLogAge").textContent, /PreInvocation · \d+s/);
+        assert.doesNotMatch(elements.get("agentLogAge").textContent, /前写入/);
+        assert.equal(fetchCalls.some((u) => String(u).includes("conversationId=auto")), false);
 
         // 5. 切到隐藏页签后停止轮询请求，防止后台窗口耗尽 HTTP/1.1 6 连接池
         docObj.visibilityState = "hidden";

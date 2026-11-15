@@ -1,31 +1,13 @@
 (function (ns) {
   const POLL_VISIBLE_INTERVAL_MS = 1000;
   const REQUEST_TIMEOUT_MS = 4500;
-  const CONV_SCOPE_KEY = "asm-conv-scope";
 
   function createClient({ onRender } = {}) {
     const { $, state, i18n, format } = ns;
     const urlParams = new URLSearchParams(window.location.search);
-    const pageConvId = window.sidecar?.conversationId || urlParams.get("conversationId") || "";
+    const urlConvId = urlParams.get("conversationId") || "";
     const urlToken = urlParams.get("token") || "";
 
-    function loadInitialConvScope() {
-      try {
-        const saved = sessionStorage.getItem(CONV_SCOPE_KEY);
-        if (saved) return saved;
-      } catch {
-      }
-      return pageConvId || "auto";
-    }
-
-    function persistConvScope(scope) {
-      try {
-        sessionStorage.setItem(CONV_SCOPE_KEY, scope);
-      } catch {
-      }
-    }
-
-    let selectedConvScope = loadInitialConvScope();
     let pollHealthy = false;
     let liveStarted = false;
     let pollStopped = false;
@@ -35,20 +17,20 @@
     let actionBannerTimer = null;
     const syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("asm-status-sync") : null;
 
+    function getCurrentConvId() {
+      return window.sidecar?.conversationId || urlConvId || "";
+    }
+
     function getConvScope() {
-      return { pageConvId, selectedConvScope };
+      return { pageConvId: getCurrentConvId() };
     }
 
-    function setSelectedConvScope(scope) {
-      selectedConvScope = scope || "auto";
-      persistConvScope(selectedConvScope);
-    }
-
-    function buildStatusEndpoint(scope = selectedConvScope) {
+    function buildStatusEndpoint() {
+      const currentConvId = getCurrentConvId();
+      if (!currentConvId) return "/api/status";
       const statusParams = new URLSearchParams();
-      if (scope) statusParams.set("conversationId", scope);
-      const statusQuery = statusParams.toString();
-      return statusQuery ? `/api/status?${statusQuery}` : "/api/status";
+      statusParams.set("conversationId", currentConvId);
+      return `/api/status?${statusParams.toString()}`;
     }
 
     function apiFetch(path, options = {}) {
@@ -119,7 +101,7 @@
     function notifySiblingPanels() {
       if (!syncChannel) return;
       try {
-        syncChannel.postMessage({ type: "refresh", scope: selectedConvScope, ts: Date.now() });
+        syncChannel.postMessage({ type: "refresh", scope: getCurrentConvId(), ts: Date.now() });
       } catch {
       }
     }
@@ -169,7 +151,7 @@
 
       const controller = typeof AbortController === "function" ? new AbortController() : null;
       pollAbortController = controller;
-      const endpoint = buildStatusEndpoint(selectedConvScope);
+      const endpoint = buildStatusEndpoint();
 
       const task = (async () => {
         try {
@@ -282,7 +264,6 @@
 
     return {
       getConvScope,
-      setSelectedConvScope,
       postJson,
       notifySiblingPanels,
       clearActionError,

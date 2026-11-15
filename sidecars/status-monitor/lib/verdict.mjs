@@ -85,6 +85,12 @@ export function computeVerdict({
   const silentSec = transcript?.latestStepAt
     ? Math.max(0, Math.floor((now - transcript.latestStepAt) / 1000))
     : null;
+  const hookAgeSec = hook?.lastEventAt
+    ? Math.max(0, Math.floor((now - hook.lastEventAt) / 1000))
+    : null;
+  const activityAgeSec = latestActivityAt
+    ? Math.max(0, Math.floor((now - latestActivityAt) / 1000))
+    : null;
 
   const latestProbe = probes[probes.length - 1] || null;
   const simulatedDown = Boolean(simulation?.active);
@@ -133,7 +139,8 @@ export function computeVerdict({
       code = "SUSPECT_STALL";
       severity = "warning";
       messageKey = "MODEL_STALL";
-      messageParams = { silentSec };
+      // 使用 elapsedSec（最新 Hook 与最新日志中的较新者）作为卡顿时长，避免将上一轮旧日志时间误报为当前等待
+      messageParams = { silentSec: elapsedSec };
     } else {
       code = "WAITING_LLM";
       severity = "active";
@@ -173,6 +180,8 @@ export function computeVerdict({
     source,
     elapsedSec,
     silentSec,
+    hookAgeSec,
+    activityAgeSec,
     networkDown,
     simulated: simulatedDown,
   };

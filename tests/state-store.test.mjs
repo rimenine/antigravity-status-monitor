@@ -533,4 +533,49 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       assert.equal(snap.recentConversations[1].active, false);
     });
   });
+
+  it("buildSnapshot 按当前绑定会话过滤事件流并保留全局网络事件", async () => {
+    await withTempDir(async (dir) => {
+      const store = createStateStore({
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(dir, "fallback.json"),
+      });
+      const t0 = Date.now();
+      store.pushTimelineEvent("probe", "网络正常", "50ms", "info");
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: t0 - 2000,
+        payload: { conversationId: "conv-a", invocationNum: 1 },
+      });
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: t0 - 1000,
+        payload: { conversationId: "conv-b", invocationNum: 7 },
+      });
+
+      const snapA = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 50 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "zh" },
+        requestedConvId: "conv-a",
+      });
+      assert.ok(snapA.events.some((e) => e.title === "网络正常"));
+      assert.ok(snapA.events.some((e) => e.conversationId === "conv-a"));
+      assert.equal(snapA.events.some((e) => e.conversationId === "conv-b"), false);
+
+      const snapB = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 50 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "zh" },
+        requestedConvId: "conv-b",
+      });
+      assert.ok(snapB.events.some((e) => e.title === "网络正常"));
+      assert.ok(snapB.events.some((e) => e.conversationId === "conv-b"));
+      assert.equal(snapB.events.some((e) => e.conversationId === "conv-a"), false);
+    });
+  });
 });
