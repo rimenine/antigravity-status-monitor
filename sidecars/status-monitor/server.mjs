@@ -28,6 +28,7 @@ import { createSecurityGuard, isAllowedHost } from "./lib/security.mjs";
 import { createServerRegistry } from "./lib/server-registry.mjs";
 import { createSseHub } from "./lib/sse-hub.mjs";
 import { createStateStore } from "./lib/state-store.mjs";
+import { normalizeConvId } from "./lib/timeline-store.mjs";
 
 function createInitialLsState() {
   return {
@@ -71,10 +72,17 @@ export async function createStatusServer({
   const alertLogger = createAlertLogger({
     logPath: alertLogPath ?? resolveAlertLogPath(configPath),
   });
-  const store = createStateStore({ brainDirs, fallbackHookPath, fallbackHooksDir, lsAddress });
   const registry = createServerRegistry({ writeServerInfo, serverInfoPath, serversDir });
   const security = createSecurityGuard({ uiToken, hookToken });
   const sdkBridge = sdkBridgeImpl || (await createSdkBridge());
+  const defaultConvId = normalizeConvId(sdkBridge.config?.conversationId);
+  const store = createStateStore({
+    brainDirs,
+    fallbackHookPath,
+    fallbackHooksDir,
+    lsAddress,
+    defaultConvId,
+  });
 
   const runtime = {
     probes: [],
@@ -86,12 +94,16 @@ export async function createStatusServer({
     simulation: {
       active: false,
       expiresAt: null,
+      convId: null,
     },
   };
 
+  function resolveEffectiveConvId(rawConvId) {
+    return normalizeConvId(rawConvId) || defaultConvId || null;
+  }
+
   function getSnapshot(requestedConvId = null) {
-    const isAuto = requestedConvId === "auto";
-    const effectiveConvId = isAuto ? null : requestedConvId || sdkBridge.config.conversationId || null;
+    const effectiveConvId = resolveEffectiveConvId(requestedConvId);
     const snap = store.buildSnapshot({
       probes: runtime.probes,
       consecutiveFailures: runtime.consecutiveFailures,
@@ -131,26 +143,18 @@ export async function createStatusServer({
   });
 
   function handleStatusOrEventsGet(req, res, url) {
-    const requestedConvId = url.searchParams.get("conversationId")?.trim() || null;
-    const isAuto = requestedConvId === "auto";
+    const boundConvId = resolveEffectiveConvId(url.searchParams.get("conversationId"));
     const recordTimeline = url.pathname === "/api/status";
-    // 无论固定单窗口还是自动模式，都优先吸收降级 Hook 文件（防止启动期 / 重启竞态漏事件）
+    // 优先吸收匹配窗口作用域的降级 Hook 文件（防止启动期 / 重启竞态漏事件）
     store.loadFallbackHookIfNewer();
-    if (isAuto || (!requestedConvId && !sdkBridge.config.conversationId)) {
-      if (isAuto) {
-        sseHub.clearLastRequestedConv();
-      }
-      store.scanTranscript(sseHub.getPinnedConvIds(), recordTimeline, { fullScanIntervalMs: 2500 });
-    } else {
-      if (requestedConvId) {
-        sseHub.recordRequestedConv(requestedConvId);
-      }
-      store.refreshTranscript(requestedConvId || sdkBridge.config.conversationId || null, recordTimeline);
+    if (boundConvId) {
+      sseHub.recordRequestedConv(boundConvId);
+      store.refreshTranscript(boundConvId, recordTimeline);
     }
 
     if (url.pathname === "/api/status") {
       sendJson(res, 200, {
-        ...getSnapshot(requestedConvId),
+        ...getSnapshot(boundConvId),
         security: {
           uiTokenEnforced: security.hasUiToken,
           sdkReady: sdkBridge.isSdkReady(),
@@ -159,7 +163,7 @@ export async function createStatusServer({
       return;
     }
 
-    sseHub.attachClient(req, res, requestedConvId);
+    sseHub.attachClient(req, res, boundConvId);
   }
 
   async function handleHookPost(req, res) {
@@ -170,15 +174,18 @@ export async function createStatusServer({
     }
     try {
       const body = await readJsonBody(req);
+      const hookConvId = normalizeConvId(body?.payload?.conversationId);
       store.applyHookEvent(body, true);
       store.clearFallbackHook(body?.receivedAt ?? Infinity, {
-        conversationId: body?.payload?.conversationId || null,
+        conversationId: hookConvId,
         lsAddress: body?.lsAddress || null,
       });
       sendJson(res, 200, { ok: true });
       setImmediate(() => {
         try {
-          store.scanTranscript(body?.payload?.conversationId || null);
+          if (hookConvId) {
+            store.refreshTranscript(hookConvId, true);
+          }
           sseHub.broadcastState();
         } catch {
         }
@@ -242,22 +249,26 @@ export async function createStatusServer({
     if (url.pathname === "/api/simulate") {
       try {
         const body = await readJsonBody(req);
+        const simConvId = resolveEffectiveConvId(
+          body.conversationId ?? url.searchParams.get("conversationId"),
+        );
         const enable = body.active !== undefined ? Boolean(body.active) : !runtime.simulation.active;
         runtime.simulation.active = enable;
         runtime.simulation.expiresAt = enable ? Date.now() + 15000 : null;
+        runtime.simulation.convId = enable ? simConvId : null;
         if (enable) {
           store.pushTimelineEvent(
             "sim",
             "开启断网警报预览",
             "持续 15 秒，可随时点击关闭",
             "warn",
-            null,
+            simConvId,
             { key: "SIM_ON" },
           );
         } else {
-          store.pushTimelineEvent("sim", "关闭断网警报预览", "", "info", null, { key: "SIM_OFF" });
+          store.pushTimelineEvent("sim", "关闭断网警报预览", "", "info", simConvId, { key: "SIM_OFF" });
         }
-        coordinator.onSimulationToggle(enable);
+        coordinator.onSimulationToggle(enable, { convId: simConvId });
         sseHub.broadcastState({ force: true });
         sendJson(res, 200, { ok: true, simulation: runtime.simulation });
       } catch (err) {

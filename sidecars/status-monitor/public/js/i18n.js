@@ -75,8 +75,8 @@
       themeAuto: "跟随 Antigravity / 系统",
       themeDark: "深色 Obsidian",
       themeLight: "浅色极简",
-      timelineTitle: "实时事件流（Hooks & 网络变化）",
-      timelineEmpty: "暂无事件，发起一次对话或等待探针变化后将自动显示",
+      timelineTitle: "实时事件流（仅本对话 Hooks & 网络）",
+      timelineEmpty: "暂无本对话事件，发起对话或等待探针变化后将自动显示",
       badges: {
         IDLE: "IDLE · 空闲",
         OFFLINE_IDLE: "OFFLINE · 断网",
@@ -180,8 +180,8 @@
       themeAuto: "Follow Host / System",
       themeDark: "Dark Obsidian",
       themeLight: "Light Minimal",
-      timelineTitle: "Live Event Stream (Hooks & Network)",
-      timelineEmpty: "No events yet. Start a chat or wait for probe changes.",
+      timelineTitle: "Live Event Stream (Current Chat & Network)",
+      timelineEmpty: "No events for this chat yet. Start a message or wait for probe changes.",
       badges: {
         IDLE: "IDLE",
         OFFLINE_IDLE: "OFFLINE",

@@ -404,14 +404,26 @@ describe("真实系统命令与子进程集成测试", () => {
         assert.equal(hookRes, 0);
 
         const s1 = JSON.parse(
+          (
+            await httpRequest(win1Info.port, "GET", "/api/status?conversationId=conv-win1-only", {
+              headers: { "X-Sidecar-Token": "tok-win-1" },
+            })
+          ).body,
+        );
+        const s1Unbound = JSON.parse(
           (await httpRequest(win1Info.port, "GET", "/api/status", { headers: { "X-Sidecar-Token": "tok-win-1" } })).body,
         );
         const s2 = JSON.parse(
-          (await httpRequest(win2Info.port, "GET", "/api/status", { headers: { "X-Sidecar-Token": "tok-win-2" } })).body,
+          (
+            await httpRequest(win2Info.port, "GET", "/api/status?conversationId=conv-win1-only", {
+              headers: { "X-Sidecar-Token": "tok-win-2" },
+            })
+          ).body,
         );
         assert.equal(s1.activeConversationId, "conv-win1-only");
         assert.equal(s1.hook.phase, "waiting_llm");
-        assert.notEqual(s2.activeConversationId, "conv-win1-only");
+        assert.equal(s1Unbound.activeConversationId, null);
+        assert.equal(s1Unbound.hook.phase, "idle");
         assert.equal(s2.hook.phase, "idle");
 
         if (process.platform === "win32") {

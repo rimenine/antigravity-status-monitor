@@ -416,8 +416,10 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       ]);
       const futureTime = new Date(Date.now() + 5000);
       utimesSync(subPath, futureTime, futureTime);
-      store.scanTranscript(null, false);
-      assert.equal(store.resolveActiveConversation(null).hook.conversationId, "conv-main");
+      store.scanTranscript(["conv-subagent", "conv-main"], false);
+      assert.equal(store.resolveActiveConversation("conv-main").hook.conversationId, "conv-main");
+      assert.equal(store.resolveActiveConversation("conv-main").hook.phase, "waiting_llm");
+      assert.equal(store.resolveActiveConversation(null).hook.conversationId, null);
     });
   });
 
@@ -465,7 +467,7 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
     });
   });
 
-  it("auto 模式在当前会话空闲后切换到另一活跃会话，并输出 recentConversations 排序列表", async () => {
+  it("彻底屏蔽 auto 切换与 recentConversations 列表，未指定 convId 时不劫持其他活跃会话", async () => {
     await withTempDir(async (dir) => {
       const store = createStateStore({
         brainDirs: [join(dir, "brain")],
@@ -474,67 +476,34 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       const t0 = Date.now();
       store.applyHookEvent({
         eventName: "PreInvocation",
-        receivedAt: t0 - 6000,
+        receivedAt: t0 - 2000,
         payload: { conversationId: "conv-a", invocationNum: 1 },
       });
       store.applyHookEvent({
-        eventName: "Stop",
-        receivedAt: t0 - 4000,
-        payload: { conversationId: "conv-a", terminationReason: "DONE" },
-      });
-      store.applyHookEvent({
-        eventName: "PreInvocation",
-        receivedAt: t0 - 1000,
-        payload: { conversationId: "conv-b", invocationNum: 2 },
-      });
-      store.applyHookEvent({
-        eventName: "Stop",
-        receivedAt: t0 - 500,
-        payload: { conversationId: "conv-b", terminationReason: "DONE" },
-      });
-      // conv-b 为 latestConvId 但已 Stop 空闲；重新让 conv-a 开始运行后，auto 应跟随回 conv-a
-      store.applyHookEvent({
         eventName: "PreInvocation",
         receivedAt: t0,
-        payload: { conversationId: "conv-a", invocationNum: 2 },
-      });
-      store.applyHookEvent({
-        eventName: "Stop",
-        receivedAt: t0 + 100,
-        payload: { conversationId: "conv-a", terminationReason: "DONE" },
-      });
-      // conv-b 处于活跃工作中，随后 conv-a 触发 Stop 导致 latestConvId 停留在空闲的 conv-a
-      store.applyHookEvent({
-        eventName: "PreInvocation",
-        receivedAt: t0 + 200,
-        payload: { conversationId: "conv-b", invocationNum: 3 },
-      });
-      store.applyHookEvent({
-        eventName: "Stop",
-        receivedAt: t0 + 300,
-        payload: { conversationId: "conv-a", terminationReason: "DONE" },
+        payload: { conversationId: "conv-b", invocationNum: 2 },
       });
 
-      const resolvedAuto = store.resolveActiveConversation("auto");
-      assert.equal(resolvedAuto.hook.conversationId, "conv-b");
+      assert.equal(store.resolveActiveConversation("auto").hook.conversationId, null);
+      assert.equal(store.resolveActiveConversation(null).hook.conversationId, null);
 
-      const snap = store.buildSnapshot({
+      const snapAuto = store.buildSnapshot({
         probes: [{ ok: true, latencyMs: 50 }],
         consecutiveFailures: 0,
         ls: { running: true, healthz: { reachable: true } },
         simulation: { active: false },
-        config: { stallThresholdSec: 25 },
+        config: { stallThresholdSec: 25, lang: "zh" },
         requestedConvId: "auto",
       });
-      assert.equal(snap.activeConversationId, "conv-b");
-      assert.equal(snap.recentConversations[0].id, "conv-b");
-      assert.equal(snap.recentConversations[0].active, true);
-      assert.equal(snap.recentConversations[1].id, "conv-a");
-      assert.equal(snap.recentConversations[1].active, false);
+      assert.equal(snapAuto.activeConversationId, null);
+      assert.equal(snapAuto.verdict.code, "IDLE");
+      assert.equal("recentConversations" in snapAuto, false);
+      assert.equal(snapAuto.events.some((e) => Boolean(e.conversationId)), false);
     });
   });
 
-  it("buildSnapshot 按当前绑定会话过滤事件流并保留全局网络事件", async () => {
+  it("物理分桶严格隔离不同会话事件流，其他会话高频事件不挤占本对话并保留全局网络变化", async () => {
     await withTempDir(async (dir) => {
       const store = createStateStore({
         brainDirs: [join(dir, "brain")],
@@ -547,11 +516,16 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
         receivedAt: t0 - 2000,
         payload: { conversationId: "conv-a", invocationNum: 1 },
       });
-      store.applyHookEvent({
-        eventName: "PreInvocation",
-        receivedAt: t0 - 1000,
-        payload: { conversationId: "conv-b", invocationNum: 7 },
-      });
+      // 无归属的模拟操作也不应泄漏进 conv-a 或 conv-b
+      store.pushTimelineEvent("sim", "开启断网警报预览", "", "warn", null, { key: "SIM_ON" });
+      // conv-b 连续产生 50 条事件，不得挤掉或混入 conv-a
+      for (let i = 1; i <= 50; i++) {
+        store.applyHookEvent({
+          eventName: "PreInvocation",
+          receivedAt: t0 + i * 10,
+          payload: { conversationId: "conv-b", invocationNum: i },
+        });
+      }
 
       const snapA = store.buildSnapshot({
         probes: [{ ok: true, latencyMs: 50 }],
@@ -564,6 +538,7 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       assert.ok(snapA.events.some((e) => e.title === "网络正常"));
       assert.ok(snapA.events.some((e) => e.conversationId === "conv-a"));
       assert.equal(snapA.events.some((e) => e.conversationId === "conv-b"), false);
+      assert.equal(snapA.events.some((e) => e.i18n?.key === "SIM_ON"), false);
 
       const snapB = store.buildSnapshot({
         probes: [{ ok: true, latencyMs: 50 }],

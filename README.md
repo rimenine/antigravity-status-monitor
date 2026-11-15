@@ -25,7 +25,7 @@
    - 只要 `transcript.jsonl` 有新输出，或者有新 Hook 进来，等待计时就会立刻归零——不会把正常的多工具长任务误判成卡死。
 2. **双链路 HTTPS 短连接探针（直连/TUN vs 代理）**
    - 按设定周期分别走直连和代理测一次短连接可达性（默认探测 `https://daily-cloudcode-pa.googleapis.com`），支持自动读取环境变量/系统代理，也可以在设置里手动填写 HTTP `Basic` 或无认证 SOCKS5 代理，再结合宿主 `Language Server` 的 443 端口连接状态一起判断链路是否正常。
-   - **自适应短连接轮询 + 窗口绑定隔离**：面板前台每 1 秒通过 `/api/status` 拉取状态（`~2ms` 用完即释放连接，切到后台自动暂停并释放连接槽位，彻底避免多个 Sidecar 标签长期占满 Chromium 6 条 HTTP/1.1 连接上限导致新面板转圈或按钮无响应），始终严格绑定当前宿主窗口所属对话（仅随用户切换窗口/对话同步切换，并过滤隔离其他并行对话的事件流与心跳耗时）；服务端仍保留 `/api/events` SSE 接口供外部按需订阅。
+   - **自适应短连接轮询 + 严格本对话隔离**：面板前台每 1 秒通过 `/api/status` 拉取状态（`~2ms` 用完即释放连接，切到后台自动暂停并释放连接槽位，彻底避免多个 Sidecar 标签长期占满 Chromium 6 条 HTTP/1.1 连接上限导致新面板转圈或按钮无响应）。前端无任何对话切换选项，服务端也彻底移除 `auto` 切换与跨目录抢占逻辑，每个对话均使用物理分桶的实时事件流，仅展示本对话的 Hooks、工具步骤、演练预警与网络变更，随宿主切换对话时同步切换；服务端仍保留 `/api/events` SSE 接口供外部按需订阅。
 3. **宿主进程追踪、分因告警与自动退出**
    - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；如果 Antigravity 已经关掉且 `/healthz` 连续连不上，Sidecar 会自动退出，不在后台留孤儿进程；
    - **分因桌面弹窗 + 本地有界故障日志**：触发桌面告警时严格区分 **VPN / 上游网络断开** 与 **Language Server 失联** 两类提示文案（避免把宿主失联误报成 VPN 断开），并将关键断网、失联与恢复事件持久化到 `.runtime/alerts.log`（有界 JSONL，自动裁剪）供事后排查。
@@ -172,7 +172,8 @@ antigravity-status-monitor/
     │   ├── sdk-bridge.mjs          # sidecar_sdk 桥接（/preload.js 与 AgentAPI）
     │   ├── transcript-reader.mjs   # Transcript 尾部读取与单文件阶段推断
     │   ├── fallback-hooks.mjs      # 离线 Hook 降级文件加载与作用域清理
-    │   ├── state-store.mjs         # 多会话状态隔离、活跃会话跟随与快照汇总
+    │   ├── timeline-store.mjs      # 按会话物理分桶的时间线事件仓库
+    │   ├── state-store.mjs         # 严格单对话状态锁定与快照汇总
     │   ├── verdict.mjs             # 纯函数状态诊断引擎
     │   ├── proxy.mjs               # 代理配置校验、Bypass/CIDR 与系统代理识别
     │   ├── process-probe.mjs       # Language Server 进程、端口与路由探查

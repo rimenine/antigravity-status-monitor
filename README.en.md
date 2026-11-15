@@ -28,7 +28,7 @@ Because a single spinner hides where execution paused, the panel tracks four dir
    - **Cause-Specific Desktop Alerts & Bounded History**: Distinguishes **Upstream Connection Lost** (VPN/network timeout) from **Language Server Unreachable** when sending desktop notifications, and persists compact disconnect, LS-down, and recovery records to `.runtime/alerts.log` (bounded JSONL with automatic trimming) for post-hoc inspection.
 3. **Dual-Link Upstream HTTPS Probes & Isolated Polling**
    - Periodically opens fresh short-lived HTTPS `GET` probes (defaulting to `https://daily-cloudcode-pa.googleapis.com`) across direct/TUN and proxy routes (reading env vars / OS proxy settings, plus an optional manual proxy with HTTP `Basic` auth or unauthenticated SOCKS5).
-   - **Adaptive Short Polling & Window-Bound Isolation**: Visible panels poll `/api/status` every 1s with short-lived requests and pause immediately when hidden (`visibilityState === "hidden"`), preventing Chromium's 6-connection-per-origin HTTP/1.1 limit from stalling new Sidecar tabs or action buttons. Each panel stays strictly bound to its own host window's conversation (following only when the user switches windows or conversations, while isolating events and LLM heartbeat timers across parallel sessions). `/api/events` SSE remains available on the backend for external consumers.
+   - **Adaptive Short Polling & Strict Current-Chat Isolation**: Visible panels poll `/api/status` every 1s with short-lived requests and pause immediately when hidden (`visibilityState === "hidden"`), preventing Chromium's 6-connection-per-origin HTTP/1.1 limit from stalling new Sidecar tabs or action buttons. The UI provides no switcher control, and the backend removes `auto` switching and cross-directory conversation hijacking altogether—every conversation keeps a physically bucketed live event stream and only displays its own Hooks, tool steps, simulation alerts, and network changes, updating only when the host switches chats. `/api/events` SSE remains available on the backend for external consumers.
 4. **Default Auth on All APIs + DNS Rebinding Guard + Strict CSP**
    - Binds strictly to `127.0.0.1` and validates the HTTP `Host` header against loopback addresses (`127.0.0.1`, `localhost`, `[::1]`) on every request to block DNS rebinding attacks;
    - **Enforces authentication on all `GET /api/*` and `POST /api/*` routes by default**: even standalone launches without `ANTIGRAVITY_SIDECAR_UI_TOKEN` automatically generate a random 48-char hex `uiToken` (printed cleanly in the startup `?token=...` URL). Rejects `Sec-Fetch-Site: cross-site`, `Origin: null`, and untrusted origins, enforces `Content-Type: application/json` on `POST`, and separates UI tokens from the Hook token (`.runtime/server.json` never stores `uiToken`);
@@ -172,7 +172,8 @@ antigravity-status-monitor/
     │   ├── sdk-bridge.mjs          # sidecar_sdk bridge (/preload.js & AgentAPI)
     │   ├── transcript-reader.mjs   # Transcript tail-chunk reader & phase inference
     │   ├── fallback-hooks.mjs      # Scoped offline fallback hook loader & cleanup
-    │   ├── state-store.mjs         # Multi-conversation isolation & snapshot builder
+    │   ├── timeline-store.mjs      # Physically bucketed per-chat live event store
+    │   ├── state-store.mjs         # Strict current-chat state & snapshot builder
     │   ├── verdict.mjs             # Pure state diagnosis engine
     │   ├── proxy.mjs               # Proxy config parsing, Bypass/CIDR & OS proxy detection
     │   ├── process-probe.mjs       # Language Server PID, 443 socket & route inspection

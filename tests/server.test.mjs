@@ -631,7 +631,7 @@ describe("server HTTP 端到端集成测试", () => {
     });
   });
 
-  it("HTTP/1.1 并发短轮询不阻塞操作、SSE 强断零泄漏且 conversationId=auto 自动跟随活跃会话", async () => {
+  it("HTTP/1.1 并发短轮询不阻塞操作、SSE 强断零泄漏且固定单对话隔离禁止 auto 切换与跨会话模拟污染", async () => {
     await withTempDir(async (dir) => {
       const app = await createStatusServer({
         configPath: join(dir, "config.json"),
@@ -642,7 +642,7 @@ describe("server HTTP 端到端集成测试", () => {
         hookToken: "hk-tok-follow",
         lsAddress: "",
         sdkBridgeImpl: {
-          config: { conversationId: "conv-pinned-idle" },
+          config: { conversationId: null },
           getPreloadJs: () => "",
           isSdkReady: () => false,
           handleSidecarRoute: async () => ({ status: 404, data: {} }),
@@ -702,23 +702,48 @@ describe("server HTTP 端到端集成测试", () => {
         );
         assert.equal(pinnedSnap.activeConversationId, "conv-pinned-idle");
         assert.equal(pinnedSnap.verdict.code, "IDLE");
+        assert.equal("recentConversations" in pinnedSnap, false);
+        assert.equal(pinnedSnap.events.some((e) => e.conversationId === "conv-active-other"), false);
+        assert.ok(pinnedSnap.events.some((e) => e.conversationId === "conv-pinned-idle"));
 
+        // 传入 conversationId=auto 时禁止切换到其他活跃会话
         const autoSnap = JSON.parse(
           (await httpRequest(port, "GET", "/api/status?conversationId=auto", { headers: uiHeaders })).body,
         );
-        assert.equal(autoSnap.activeConversationId, "conv-active-other");
-        assert.equal(autoSnap.verdict.code, "WAITING_LLM");
-        assert.ok(Array.isArray(autoSnap.recentConversations));
-        assert.equal(autoSnap.recentConversations[0].id, "conv-active-other");
-        assert.equal(autoSnap.recentConversations[0].active, true);
-        assert.ok(autoSnap.recentConversations.some((c) => c.id === "conv-pinned-idle" && c.active === false));
+        assert.equal(autoSnap.activeConversationId, null);
+        assert.equal(autoSnap.verdict.code, "IDLE");
+        assert.equal("recentConversations" in autoSnap, false);
+        assert.equal(autoSnap.events.length, 0);
+
+        // 在 conv-active-other 开启模拟告警时，不得影响 conv-pinned-idle 的状态或事件流
+        await httpRequest(port, "POST", "/api/simulate", {
+          headers: postHeaders,
+          body: { active: true, conversationId: "conv-active-other" },
+        });
+        const pinnedAfterOtherSim = JSON.parse(
+          (await httpRequest(port, "GET", "/api/status?conversationId=conv-pinned-idle", { headers: uiHeaders })).body,
+        );
+        assert.equal(pinnedAfterOtherSim.verdict.code, "IDLE");
+        assert.equal(pinnedAfterOtherSim.simulation.active, false);
+        assert.equal(pinnedAfterOtherSim.events.some((e) => e.i18n?.key === "SIM_ON"), false);
+
+        const otherSnap = JSON.parse(
+          (await httpRequest(port, "GET", "/api/status?conversationId=conv-active-other", { headers: uiHeaders })).body,
+        );
+        assert.equal(otherSnap.verdict.code, "DISCONNECTED_HANG");
+        assert.equal(otherSnap.simulation.active, true);
+        assert.ok(otherSnap.events.some((e) => e.i18n?.key === "SIM_ON"));
+        await httpRequest(port, "POST", "/api/simulate", {
+          headers: postHeaders,
+          body: { active: false, conversationId: "conv-active-other" },
+        });
 
         // 模拟 6 个 SSE 客户端连接后突然断开，验证服务端零泄漏
         const sseReqs = await Promise.all(
           Array.from({ length: 6 }, () =>
             new Promise((resolve) => {
               const req = http.get(
-                `http://127.0.0.1:${port}/api/events?conversationId=auto&token=ui-tok-follow`,
+                `http://127.0.0.1:${port}/api/events?conversationId=conv-pinned-idle&token=ui-tok-follow`,
                 (res) => {
                   res.once("data", () => resolve(req));
                 },
@@ -755,11 +780,11 @@ describe("server HTTP 端到端集成测试", () => {
         try {
           const startedAt = Date.now();
           const batch = await Promise.all([
-            ...Array.from({ length: 20 }, () => pooledReq("GET", "/api/status?conversationId=auto", uiHeaders)),
+            ...Array.from({ length: 20 }, () => pooledReq("GET", "/api/status?conversationId=conv-pinned-idle", uiHeaders)),
             pooledReq("GET", "/"),
-            pooledReq("POST", "/api/simulate", postHeaders, { active: true }),
-            pooledReq("GET", "/api/status?conversationId=auto", uiHeaders),
-            pooledReq("POST", "/api/simulate", postHeaders, { active: false }),
+            pooledReq("POST", "/api/simulate", postHeaders, { active: true, conversationId: "conv-pinned-idle" }),
+            pooledReq("GET", "/api/status?conversationId=conv-pinned-idle", uiHeaders),
+            pooledReq("POST", "/api/simulate", postHeaders, { active: false, conversationId: "conv-pinned-idle" }),
           ]);
           const elapsed = Date.now() - startedAt;
           assert.ok(batch.every((r) => r.status === 200));

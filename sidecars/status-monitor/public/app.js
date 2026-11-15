@@ -38,7 +38,10 @@
 
   $("btnSim").addEventListener("click", () => {
     const nextActive = !Boolean(state.lastData?.simulation?.active);
-    runActionButton($("btnSim"), () => client.postJson("/api/simulate", { active: nextActive }));
+    const currentConvId = client.getConvScope().pageConvId || null;
+    runActionButton($("btnSim"), () =>
+      client.postJson("/api/simulate", { active: nextActive, conversationId: currentConvId }),
+    );
   });
 
   $("btnSettings").addEventListener("click", () => {

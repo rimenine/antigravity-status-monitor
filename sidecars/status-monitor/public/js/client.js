@@ -17,8 +17,14 @@
     let actionBannerTimer = null;
     const syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("asm-status-sync") : null;
 
+    function normalizeConvId(raw) {
+      if (typeof raw !== "string") return "";
+      const trimmed = raw.trim();
+      return trimmed && trimmed !== "auto" ? trimmed : "";
+    }
+
     function getCurrentConvId() {
-      return window.sidecar?.conversationId || urlConvId || "";
+      return normalizeConvId(window.sidecar?.conversationId) || normalizeConvId(urlConvId);
     }
 
     function getConvScope() {
@@ -251,7 +257,9 @@
       window.addEventListener("beforeunload", stopPolling);
 
       if (syncChannel) {
-        syncChannel.onmessage = () => {
+        syncChannel.onmessage = (ev) => {
+          const msgScope = ev?.data?.scope || "";
+          if (msgScope && msgScope !== getCurrentConvId()) return;
           if (!pollStopped && document.visibilityState !== "hidden") {
             clearPollTimer();
             pollStatus({ manual: true }).finally(() => scheduleNextPoll());

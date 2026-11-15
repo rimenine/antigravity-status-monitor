@@ -48,7 +48,9 @@ export function createProbeCoordinator({
     }
   }
 
-  function onSimulationToggle(enable, now = Date.now()) {
+  function onSimulationToggle(enable, options = {}) {
+    const now = typeof options === "number" ? options : options?.now ?? Date.now();
+    const convId = typeof options === "object" && options !== null ? options.convId || null : null;
     if (enable) {
       if (!simBackupNotifyState) {
         simBackupNotifyState = { prevVerdictCode, lastNotifiedAt };
@@ -65,7 +67,7 @@ export function createProbeCoordinator({
         reason: "MANUAL_PREVIEW",
         simulated: true,
         notified,
-        convId: getPreferredConvId() || null,
+        convId: convId || getPreferredConvId() || null,
       });
       return;
     }
@@ -109,6 +111,7 @@ export function createProbeCoordinator({
     if (runtime.simulation.active && runtime.simulation.expiresAt && now > runtime.simulation.expiresAt) {
       runtime.simulation.active = false;
       runtime.simulation.expiresAt = null;
+      runtime.simulation.convId = null;
       restoreNotifyStateAfterSim();
     }
 
@@ -168,7 +171,9 @@ export function createProbeCoordinator({
       envProxy: getEnvProxy(process.env, probeUrlSnapshot),
     });
     const wasDown = runtime.consecutiveFailures >= 2;
-    const activeConv = store.resolveActiveConversation(getPreferredConvId());
+    const simConvId = runtime.simulation?.active ? runtime.simulation.convId : null;
+    const targetConvId = simConvId || getPreferredConvId();
+    const activeConv = store.resolveActiveConversation(targetConvId);
 
     if (result.ok) {
       runtime.consecutiveFailures = 0;
@@ -335,7 +340,7 @@ export function createProbeCoordinator({
   function startSchedulers({ getPinnedConvIds }) {
     if (disableSchedulers) return;
     store.loadFallbackHookIfNewer();
-    store.scanTranscript();
+    store.scanTranscript(getPinnedConvIds(), true);
     runLsInspection()
       .then(() => runProbeOnce())
       .catch(() => {});
@@ -343,7 +348,7 @@ export function createProbeCoordinator({
     timers.push(
       setInterval(() => {
         const pinnedConvIds = getPinnedConvIds();
-        if (store.scanTranscript(pinnedConvIds, true, { fullScanIntervalMs: 4500 })) {
+        if (store.scanTranscript(pinnedConvIds, true)) {
           onStateChanged({ force: true });
         }
       }, 1500),
