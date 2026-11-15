@@ -130,7 +130,7 @@ After installation, open or restart Antigravity (or toggle the plugin off and ba
 ## Controls & Configuration
 
 - **Top bar actions**: `Probe` (run immediate connectivity test), `Test Alert` (15-second simulated hang alert preview), and **Settings gear icon**.
-- **Configurable options**: Probe interval (`2s` / `3s` / `5s`), stall threshold (`15s` / `25s` / `45s`), probe target, manual proxy override, theme (`Follow Host / System`, `Dark Obsidian`, `Light Minimal`), and desktop hang notification toggle.
+- **Configurable options**: Language (`中文` / `English`, auto-detected from system locale on first run), probe interval (`2s` / `3s` / `5s`), stall threshold (`15s` / `25s` / `45s`), probe target, manual proxy override, theme (`Follow Host / System`, `Dark Obsidian`, `Light Minimal`), and desktop hang notification toggle.
 
 ---
 
@@ -175,7 +175,11 @@ antigravity-status-monitor/
     │   ├── timeline-store.mjs      # Physically bucketed per-chat live event store
     │   ├── state-store.mjs         # Strict current-chat state & snapshot builder
     │   ├── verdict.mjs             # Pure state diagnosis engine
-    │   ├── proxy.mjs               # Proxy config parsing, Bypass/CIDR & OS proxy detection
+    │   ├── proxy-bypass.mjs        # NO_PROXY / CIDR / wildcard bypass matching & IP helpers
+    │   ├── proxy-url.mjs           # Proxy URL validation/parsing & env proxy reader
+    │   ├── proxy-system.mjs        # Windows Registry / macOS scutil / Linux gsettings parsers
+    │   ├── proxy.mjs               # Cached proxy detection orchestrator & facade
+    │   ├── proxy-tunnel.mjs        # HTTP CONNECT & unauthenticated SOCKS5 tunnel handshakes
     │   ├── process-probe.mjs       # Language Server PID, 443 socket & route inspection
     │   ├── notify.mjs              # Cross-platform desktop alerts (WinRT / AppleScript / libnotify)
     │   ├── probe.mjs               # Direct & proxied HTTPS upstream probe facade

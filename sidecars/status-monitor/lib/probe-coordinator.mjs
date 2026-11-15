@@ -106,53 +106,33 @@ export function createProbeCoordinator({
     }
   }
 
-  async function executeProbeOnce(expectedGen = configGeneration, { forceRefresh = false } = {}) {
-    const now = Date.now();
-    if (runtime.simulation.active && runtime.simulation.expiresAt && now > runtime.simulation.expiresAt) {
-      runtime.simulation.active = false;
-      runtime.simulation.expiresAt = null;
-      runtime.simulation.convId = null;
-      restoreNotifyStateAfterSim();
+  function expireSimulationIfNeeded(now = Date.now()) {
+    if (!runtime.simulation.active || !runtime.simulation.expiresAt || now <= runtime.simulation.expiresAt) {
+      return;
     }
+    runtime.simulation.active = false;
+    runtime.simulation.expiresAt = null;
+    runtime.simulation.convId = null;
+    restoreNotifyStateAfterSim();
+  }
 
-    const probeUrlSnapshot = config.probeUrl;
-    const timeoutSnapshot = config.timeoutMs;
-    const manualProxySnapshot = config.manualProxyUrl;
+  function buildProbeErrorSample(probeUrlSnapshot, err) {
+    return {
+      ts: Date.now(),
+      latencyMs: 0,
+      mode: "direct",
+      activeRoute: "direct",
+      proxyAddress: null,
+      proxyConfig: runtime.lastProxyConfig,
+      target: probeUrlSnapshot,
+      ok: false,
+      statusCode: null,
+      error: err?.message || "探测异常",
+      dual: { direct: null, proxy: null },
+    };
+  }
 
-    let dual;
-    try {
-      dual = await probePathsFn(probeUrlSnapshot, timeoutSnapshot, {
-        manualProxyUrl: manualProxySnapshot,
-        forceRefresh,
-      });
-    } catch (err) {
-      if (expectedGen !== configGeneration) {
-        return runtime.probes[runtime.probes.length - 1] || null;
-      }
-      const errResult = {
-        ts: Date.now(),
-        latencyMs: 0,
-        mode: "direct",
-        activeRoute: "direct",
-        proxyAddress: null,
-        proxyConfig: runtime.lastProxyConfig,
-        target: probeUrlSnapshot,
-        ok: false,
-        statusCode: null,
-        error: err?.message || "探测异常",
-        dual: { direct: null, proxy: null },
-      };
-      runtime.consecutiveFailures += 1;
-      pushProbeSample(errResult);
-      onStateChanged({ force: true });
-      throw err;
-    }
-
-    // 探测期间若目标地址或代理刚被修改，丢弃过期样本并立刻按最新配置复测。
-    if (expectedGen !== configGeneration) {
-      return runProbeOnce({ forceRefresh: true });
-    }
-
+  function clearStaleProxyRouteIfNeeded(dual) {
     runtime.lastProxyConfig = dual.proxyConfig;
     const hasConfiguredProxy = Boolean(dual?.proxy || dual?.proxyConfig?.enabled);
     if (!hasConfiguredProxy && runtime.lastKnownLsRoute === "proxy") {
@@ -161,58 +141,47 @@ export function createProbeCoordinator({
         runtime.ls.route = runtime.ls.tunDetected ? "tun" : null;
       }
     }
+  }
 
-    recordPacStatusIfNeeded(dual);
-
-    const result = selectEffectiveProbe({
-      dual,
-      ls: runtime.ls,
-      lastKnownLsRoute: runtime.lastKnownLsRoute,
-      envProxy: getEnvProxy(process.env, probeUrlSnapshot),
-    });
+  function recordNetworkTransition(result, convId) {
     const wasDown = runtime.consecutiveFailures >= 2;
-    const simConvId = runtime.simulation?.active ? runtime.simulation.convId : null;
-    const targetConvId = simConvId || getPreferredConvId();
-    const activeConv = store.resolveActiveConversation(targetConvId);
-
     if (result.ok) {
       runtime.consecutiveFailures = 0;
-      if (wasDown) {
-        store.pushTimelineEvent(
-          "net",
-          "VPN / 上游网络已恢复",
-          `延迟 ${result.latencyMs} ms`,
-          "success",
-          null,
-          { key: "NET_RECOVERED", params: { latencyMs: result.latencyMs } },
-        );
-        alertLogger?.append({
-          type: "NET_RECOVERED",
-          latencyMs: result.latencyMs,
-          convId: activeConv.id || null,
-        });
-      }
-    } else {
-      runtime.consecutiveFailures += 1;
-      if (runtime.consecutiveFailures === 2) {
-        store.pushTimelineEvent(
-          "net",
-          "上游网络连续探测失败",
-          result.error || "超时",
-          "error",
-          null,
-          { key: "NET_FAILED", params: { error: result.error || "" } },
-        );
-        alertLogger?.append({
-          type: "NET_FAILED",
-          error: result.error || "超时",
-          convId: activeConv.id || null,
-        });
-      }
+      if (!wasDown) return;
+      store.pushTimelineEvent(
+        "net",
+        "VPN / 上游网络已恢复",
+        `延迟 ${result.latencyMs} ms`,
+        "success",
+        null,
+        { key: "NET_RECOVERED", params: { latencyMs: result.latencyMs } },
+      );
+      alertLogger?.append({
+        type: "NET_RECOVERED",
+        latencyMs: result.latencyMs,
+        convId: convId || null,
+      });
+      return;
     }
 
-    pushProbeSample(result);
+    runtime.consecutiveFailures += 1;
+    if (runtime.consecutiveFailures !== 2) return;
+    store.pushTimelineEvent(
+      "net",
+      "上游网络连续探测失败",
+      result.error || "超时",
+      "error",
+      null,
+      { key: "NET_FAILED", params: { error: result.error || "" } },
+    );
+    alertLogger?.append({
+      type: "NET_FAILED",
+      error: result.error || "超时",
+      convId: convId || null,
+    });
+  }
 
+  function maybeDispatchHangAlert(activeConv, result) {
     const verdict = computeVerdict({
       hook: activeConv.hook,
       transcript: activeConv.transcript,
@@ -223,13 +192,8 @@ export function createProbeCoordinator({
       config,
     });
 
-    if (
-      verdict.code === "DISCONNECTED_HANG" &&
-      prevVerdictCode !== "DISCONNECTED_HANG"
-    ) {
-      const canNotify =
-        config.notifyOnDisconnect &&
-        Date.now() - lastNotifiedAt > NOTIFY_COOLDOWN_MS;
+    if (verdict.code === "DISCONNECTED_HANG" && prevVerdictCode !== "DISCONNECTED_HANG") {
+      const canNotify = config.notifyOnDisconnect && Date.now() - lastNotifiedAt > NOTIFY_COOLDOWN_MS;
       if (canNotify) {
         lastNotifiedAt = Date.now();
         const note = getNotificationText(
@@ -251,6 +215,50 @@ export function createProbeCoordinator({
       });
     }
     prevVerdictCode = verdict.code;
+  }
+
+  async function executeProbeOnce(expectedGen = configGeneration, { forceRefresh = false } = {}) {
+    expireSimulationIfNeeded();
+    const probeUrlSnapshot = config.probeUrl;
+    const timeoutSnapshot = config.timeoutMs;
+    const manualProxySnapshot = config.manualProxyUrl;
+
+    let dual;
+    try {
+      dual = await probePathsFn(probeUrlSnapshot, timeoutSnapshot, {
+        manualProxyUrl: manualProxySnapshot,
+        forceRefresh,
+      });
+    } catch (err) {
+      if (expectedGen !== configGeneration) {
+        return runtime.probes[runtime.probes.length - 1] || null;
+      }
+      runtime.consecutiveFailures += 1;
+      pushProbeSample(buildProbeErrorSample(probeUrlSnapshot, err));
+      onStateChanged({ force: true });
+      throw err;
+    }
+
+    // 探测期间若目标地址或代理刚被修改，丢弃过期样本并立刻按最新配置复测。
+    if (expectedGen !== configGeneration) {
+      return runProbeOnce({ forceRefresh: true });
+    }
+
+    clearStaleProxyRouteIfNeeded(dual);
+    recordPacStatusIfNeeded(dual);
+
+    const result = selectEffectiveProbe({
+      dual,
+      ls: runtime.ls,
+      lastKnownLsRoute: runtime.lastKnownLsRoute,
+      envProxy: getEnvProxy(process.env, probeUrlSnapshot),
+    });
+    const simConvId = runtime.simulation?.active ? runtime.simulation.convId : null;
+    const activeConv = store.resolveActiveConversation(simConvId || getPreferredConvId());
+
+    recordNetworkTransition(result, activeConv.id);
+    pushProbeSample(result);
+    maybeDispatchHangAlert(activeConv, result);
     onStateChanged({ force: true });
     return result;
   }

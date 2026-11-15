@@ -1,4 +1,77 @@
 (function (ns) {
+  function buildSparklineSvg(list, d, format) {
+    const w = 360;
+    const h = 72;
+    const padTop = 18;
+    const padBottom = 6;
+    const usableH = h - padTop - padBottom;
+    const maxLat = Math.max(300, ...list.map((p) => (p.ok ? p.latencyMs : 0)));
+    const stepX = list.length > 1 ? w / (list.length - 1) : w / 2;
+
+    const coords = list.map((p, i) => {
+      const x = list.length === 1 ? w / 2 : i * stepX;
+      const norm = p.ok ? Math.min(1, p.latencyMs / maxLat) : 0;
+      const y = p.ok ? padTop + usableH * (1 - norm * 0.85) : padTop;
+      return { x, y, p };
+    });
+
+    const okRuns = [];
+    let curRun = [];
+    for (const c of coords) {
+      if (c.p.ok) curRun.push(c);
+      else if (curRun.length > 0) {
+        okRuns.push(curRun);
+        curRun = [];
+      }
+    }
+    if (curRun.length > 0) okRuns.push(curRun);
+
+    const areaPaths = okRuns
+      .filter((run) => run.length > 1)
+      .map((run) => {
+        const pts = run.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`);
+        return `M ${run[0].x.toFixed(1)},${h} L ${pts.join(" L ")} L ${run[run.length - 1].x.toFixed(1)},${h} Z`;
+      });
+    const linePaths = okRuns
+      .filter((run) => run.length > 1)
+      .map((run) => `M ${run.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" L ")}`);
+
+    const dots = coords
+      .map((c, idx) => {
+        if (!c.p.ok) {
+          return `<rect x="${(c.x - 2.2).toFixed(1)}" y="${padTop}" width="4.4" height="${usableH}" rx="2" fill="var(--mon-danger)" opacity="0.82"><title>${format.fmtTime(c.p.ts)} ${d.fail}: ${format.escapeHtml(c.p.error)}</title></rect>`;
+        }
+        const isLast = idx === coords.length - 1;
+        return `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${isLast ? 3.3 : 1.7}" fill="var(--mon-ok)" opacity="${isLast ? 1 : 0.55}"><title>${format.fmtTime(c.p.ts)} ${c.p.latencyMs} ms</title></circle>`;
+      })
+      .join("");
+
+    return `
+      <defs>
+        <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="var(--mon-ok)" stop-opacity="0.28"/>
+          <stop offset="100%" stop-color="var(--mon-ok)" stop-opacity="0.01"/>
+        </linearGradient>
+      </defs>
+      <line x1="0" y1="${padTop + usableH * 0.5}" x2="${w}" y2="${padTop + usableH * 0.5}" stroke="var(--mon-border)" stroke-dasharray="3 3" />
+      ${areaPaths.map((dStr) => `<path d="${dStr}" fill="url(#sparkArea)" />`).join("")}
+      ${linePaths.map((dStr) => `<path d="${dStr}" fill="none" stroke="var(--mon-ok)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />`).join("")}
+      ${dots}
+    `;
+  }
+
+  function buildSparklineTooltip(last, d, format) {
+    const dir = last.dual?.direct;
+    const prx = last.dual?.proxy;
+    const dualNote =
+      dir && prx
+        ? d.dualNote(dir.ok ? `${dir.latencyMs}ms` : d.down, prx.ok ? `${prx.latencyMs}ms` : d.down)
+        : "";
+    return last.ok
+      ? d.latestOk(format.fmtTime(last.ts), last.latencyMs, last.statusCode, dualNote)
+      : d.latestFail(format.fmtTime(last.ts), last.error || d.timeout, dualNote);
+  }
+
   function renderSparkline(probes) {
     const { $, state, i18n, format } = ns;
     const d = i18n.dict();
@@ -22,81 +95,9 @@
 
     if (sig === state.lastSparkSig) return;
     state.lastSparkSig = sig;
+    svg.innerHTML = buildSparklineSvg(list, d, format);
 
-    const w = 360;
-    const h = 72;
-    const padTop = 18;
-    const padBottom = 6;
-    const usableH = h - padTop - padBottom;
-    const maxLat = Math.max(300, ...list.map((p) => (p.ok ? p.latencyMs : 0)));
-
-    const stepX = list.length > 1 ? w / (list.length - 1) : w / 2;
-    const coords = list.map((p, i) => {
-      const x = list.length === 1 ? w / 2 : i * stepX;
-      const norm = p.ok ? Math.min(1, p.latencyMs / maxLat) : 0;
-      const y = p.ok ? padTop + usableH * (1 - norm * 0.85) : padTop;
-      return { x, y, p };
-    });
-
-    const okRuns = [];
-    let curRun = [];
-    for (const c of coords) {
-      if (c.p.ok) {
-        curRun.push(c);
-      } else if (curRun.length > 0) {
-        okRuns.push(curRun);
-        curRun = [];
-      }
-    }
-    if (curRun.length > 0) okRuns.push(curRun);
-
-    const areaPaths = okRuns
-      .filter((run) => run.length > 1)
-      .map((run) => {
-        const pts = run.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`);
-        return `M ${run[0].x.toFixed(1)},${h} L ${pts.join(" L ")} L ${run[run.length - 1].x.toFixed(1)},${h} Z`;
-      });
-    const linePaths = okRuns
-      .filter((run) => run.length > 1)
-      .map((run) => `M ${run.map((c) => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(" L ")}`);
-
-    const dots = coords
-      .map((c, idx) => {
-        const isLast = idx === coords.length - 1;
-        if (!c.p.ok) {
-          return `<rect x="${(c.x - 2.2).toFixed(1)}" y="${padTop}" width="4.4" height="${usableH}" rx="2" fill="var(--mon-danger)" opacity="0.82"><title>${format.fmtTime(c.p.ts)} ${d.fail}: ${format.escapeHtml(c.p.error)}</title></rect>`;
-        }
-        const r = isLast ? 3.3 : 1.7;
-        const opacity = isLast ? 1 : 0.55;
-        return `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${r}" fill="var(--mon-ok)" opacity="${opacity}"><title>${format.fmtTime(c.p.ts)} ${c.p.latencyMs} ms</title></circle>`;
-      })
-      .join("");
-
-    svg.innerHTML = `
-      <defs>
-        <linearGradient id="sparkArea" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stop-color="var(--mon-ok)" stop-opacity="0.28"/>
-          <stop offset="100%" stop-color="var(--mon-ok)" stop-opacity="0.01"/>
-        </linearGradient>
-      </defs>
-      <line x1="0" y1="${padTop + usableH * 0.5}" x2="${w}" y2="${padTop + usableH * 0.5}" stroke="var(--mon-border)" stroke-dasharray="3 3" />
-      ${areaPaths.map((dStr) => `<path d="${dStr}" fill="url(#sparkArea)" />`).join("")}
-      ${linePaths.map((dStr) => `<path d="${dStr}" fill="none" stroke="var(--mon-ok)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />`).join("")}
-      ${dots}
-    `;
-
-    const dir = last.dual?.direct;
-    const prx = last.dual?.proxy;
-    const dualNote =
-      dir && prx
-        ? d.dualNote(
-            dir.ok ? `${dir.latencyMs}ms` : d.down,
-            prx.ok ? `${prx.latencyMs}ms` : d.down,
-          )
-        : "";
-    const tipText = last.ok
-      ? d.latestOk(format.fmtTime(last.ts), last.latencyMs, last.statusCode, dualNote)
-      : d.latestFail(format.fmtTime(last.ts), last.error || d.timeout, dualNote);
+    const tipText = buildSparklineTooltip(last, d, format);
     tooltip.textContent = tipText;
     tooltip.title = tipText;
   }

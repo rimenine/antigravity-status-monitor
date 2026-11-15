@@ -130,7 +130,7 @@ sh ./uninstall.sh --keep-config  # 卸载但保留配置文件
 ## 功能与配置说明
 
 - **顶部按钮**：`探测`（立即测速）、`预览告警`（15 秒模拟断网挂起效果）、**齿轮图标**（展开设置）。
-- **可调参数**：探测频率（`2s` / `3s` / `5s`）、卡顿预警阈值（`15s` / `25s` / `45s`）、探测目标、手动代理、主题模式（跟随宿主 / 深色 / 浅色）、断网系统通知开关。
+- **可调参数**：界面语言（`中文` / `English`，首次按系统语言自动选择）、探测频率（`2s` / `3s` / `5s`）、卡顿预警阈值（`15s` / `25s` / `45s`）、探测目标、手动代理、主题模式（跟随宿主 / 深色 / 浅色）、断网系统通知开关。
 
 ---
 
@@ -175,7 +175,11 @@ antigravity-status-monitor/
     │   ├── timeline-store.mjs      # 按会话物理分桶的时间线事件仓库
     │   ├── state-store.mjs         # 严格单对话状态锁定与快照汇总
     │   ├── verdict.mjs             # 纯函数状态诊断引擎
-    │   ├── proxy.mjs               # 代理配置校验、Bypass/CIDR 与系统代理识别
+    │   ├── proxy-bypass.mjs        # IP/CIDR/通配符/NO_PROXY 绕过匹配与 IP 标准化
+    │   ├── proxy-url.mjs           # 代理 URL 校验/解析与环境变量代理读取
+    │   ├── proxy-system.mjs        # Windows 注册表 / macOS scutil / Linux gsettings 代理检测
+    │   ├── proxy.mjs               # 代理检测缓存协调与统一导出门面
+    │   ├── proxy-tunnel.mjs        # HTTP CONNECT 与无认证 SOCKS5 隧道握手
     │   ├── process-probe.mjs       # Language Server 进程、端口与路由探查
     │   ├── notify.mjs              # 跨平台桌面系统通知（WinRT / AppleScript / libnotify）
     │   ├── probe.mjs               # 直连与代理隧道 HTTPS 上游探测（统一导出门面）
