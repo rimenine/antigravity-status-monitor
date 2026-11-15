@@ -1,176 +1,29 @@
-import {
-  closeSync,
-  existsSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readSync,
-  statSync,
-  unlinkSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { BRAIN_DIRS, FALLBACK_HOOK_PATH } from "./config.mjs";
+import {
+  clearMatchingFallbackHooks,
+  readMatchingFallbackHooks,
+  resolveFallbackHooksDir,
+} from "./fallback-hooks.mjs";
 import { resolveEventText } from "./i18n.mjs";
-import { doesFallbackRecordMatchScope } from "./runtime-paths.mjs";
 import { collectTokenStats, resolveTranscriptLogPath } from "./tokens.mjs";
+import {
+  createEmptyHook,
+  createEmptyTranscript,
+  parseTranscriptSnapshot,
+} from "./transcript-reader.mjs";
 import { computeVerdict } from "./verdict.mjs";
 
-function createEmptyHook(conversationId = null) {
-  return {
-    phase: "idle",
-    lastEvent: null,
-    lastEventAt: null,
-    turnStartedAt: null,
-    conversationId,
-    modelName: null,
-    toolName: null,
-    stepIdx: null,
-    terminationReason: null,
-    error: null,
-    transcriptPath: null,
-  };
-}
+const ACTIVE_WINDOW_MS = 10 * 60 * 1000;
 
-function createEmptyTranscript(conversationId = null) {
-  return {
-    conversationId,
-    filePath: null,
-    mtimeMs: null,
-    size: null,
-    latestStepIndex: null,
-    latestStepType: null,
-    latestStepStatus: null,
-    latestStepAt: null,
-    latestRecordCreatedAt: null,
-    hasUserExplicit: false,
-    lastToolName: null,
-    tokens: null,
-    inferredPhase: "idle",
-  };
-}
-
-const TERMINAL_PLANNER_STATUSES = new Set([
-  "DONE",
-  "ERROR",
-  "CANCELLED",
-  "CANCELED",
-  "FAILED",
-  "ABORTED",
-  "STOPPED",
-]);
-
-function readLastCompleteLineFallback(fd, size, maxScanBytes = 32 * 1024 * 1024) {
-  const chunkSize = 512 * 1024;
-  let pos = size;
-  let trailingEmpty = true;
-  let lineEnd = size;
-  const minPos = Math.max(0, size - maxScanBytes);
-
-  while (pos > minPos) {
-    const start = Math.max(minPos, pos - chunkSize);
-    const len = pos - start;
-    const buf = Buffer.allocUnsafe(len);
-    const n = readSync(fd, buf, 0, len, start);
-    if (n <= 0) break;
-    let idx = n - 1;
-    while (idx >= 0) {
-      if (buf[idx] === 0x0a) {
-        if (trailingEmpty && start + idx >= lineEnd - 2) {
-          lineEnd = start + idx;
-          idx -= 1;
-          continue;
-        }
-        const lineStart = start + idx + 1;
-        const lineLen = lineEnd - lineStart;
-        if (lineLen > 0) {
-          const lineBuf = Buffer.allocUnsafe(lineLen);
-          const rn = readSync(fd, lineBuf, 0, lineLen, lineStart);
-          try {
-            return [JSON.parse(lineBuf.subarray(0, rn).toString("utf8").trim())];
-          } catch {
-            return [];
-          }
-        }
-      } else if (buf[idx] !== 0x0d && buf[idx] !== 0x20 && buf[idx] !== 0x09) {
-        trailingEmpty = false;
-      }
-      idx -= 1;
-    }
-    pos = start;
-  }
-
-  if (minPos === 0 && lineEnd > 0) {
-    const lineBuf = Buffer.allocUnsafe(lineEnd);
-    const rn = readSync(fd, lineBuf, 0, lineEnd, 0);
-    try {
-      return [JSON.parse(lineBuf.subarray(0, rn).toString("utf8").trim())];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
-function readWindowRecords(fd, size, windowBytes) {
-  const start = Math.max(0, size - windowBytes);
-  const length = size - start;
-  const buf = Buffer.allocUnsafe(length);
-  const bytesRead = readSync(fd, buf, 0, length, start);
-  let slice = buf.subarray(0, bytesRead);
-  if (start > 0) {
-    const firstNl = slice.indexOf(0x0a);
-    if (firstNl === -1) {
-      return { start, parsed: [] };
-    }
-    slice = slice.subarray(firstNl + 1);
-  }
-  const parsed = [];
-  for (const line of slice.toString("utf8").split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      parsed.push(JSON.parse(line));
-    } catch {
-    }
-  }
-  return { start, parsed };
-}
-
-function readTailLines(filePath, stat, initialBytes = 32768, maxBytes = 16 * 1024 * 1024) {
-  const size = stat.size;
-  if (size <= 0) return { mtimeMs: stat.mtimeMs, size: 0, parsed: [] };
-
-  const fd = openSync(filePath, "r");
-  try {
-    let windowBytes = initialBytes;
-    while (true) {
-      const { start, parsed } = readWindowRecords(fd, size, windowBytes);
-      const hasPlanner = parsed.some((x) => x.type === "PLANNER_RESPONSE");
-      if (start === 0 || (parsed.length > 0 && hasPlanner)) {
-        return { mtimeMs: stat.mtimeMs, size, parsed };
-      }
-      if (windowBytes >= maxBytes) {
-        const finalParsed = parsed.length > 0 ? parsed : readLastCompleteLineFallback(fd, size);
-        return { mtimeMs: stat.mtimeMs, size, parsed: finalParsed };
-      }
-      windowBytes = Math.min(maxBytes, windowBytes * 4);
-    }
-  } finally {
-    closeSync(fd);
-  }
-}
-
+/** 创建多会话隔离的状态仓库，负责聚合 Hooks、Transcript 日志与裁决快照。 */
 export function createStateStore({
   brainDirs = BRAIN_DIRS,
   fallbackHookPath = FALLBACK_HOOK_PATH,
   fallbackHooksDir = undefined,
   lsAddress = "",
 } = {}) {
-  const resolvedFallbackHooksDir =
-    fallbackHooksDir !== undefined
-      ? fallbackHooksDir
-      : fallbackHookPath
-        ? join(dirname(fallbackHookPath), "hooks")
-        : null;
+  const resolvedFallbackHooksDir = resolveFallbackHooksDir(fallbackHookPath, fallbackHooksDir);
   const conversations = new Map();
   const loggedToolSteps = new Set();
   const events = [];
@@ -226,126 +79,51 @@ export function createStateStore({
 
   function parseTranscriptFile(convId, filePath, recordTimeline = true) {
     if (!filePath || !existsSync(filePath)) return false;
-    let stat;
-    try {
-      stat = statSync(filePath);
-    } catch {
-      return false;
-    }
-
+    const now = Date.now();
     const existingConv = conversations.get(convId || "default");
-    const prevT = existingConv?.transcript;
-    if (
-      prevT &&
-      prevT.filePath === filePath &&
-      prevT.mtimeMs === stat.mtimeMs &&
-      prevT.size === stat.size
-    ) {
-      if (
-        prevT.inferredPhase !== "idle" &&
-        Date.now() - Math.max(prevT.latestStepAt || 0, prevT.mtimeMs || 0) >= 10 * 60 * 1000
-      ) {
-        prevT.inferredPhase = "idle";
-        return true;
-      }
+    const result = parseTranscriptSnapshot(filePath, convId, existingConv?.transcript || null, now);
+
+    if (result.status === "stale-idle" && existingConv?.transcript) {
+      existingConv.transcript.inferredPhase = "idle";
+      return true;
+    }
+    if (result.status !== "updated") {
       return false;
     }
 
-    const fileActivelyUpdated =
-      Boolean(prevT) &&
-      prevT.filePath === filePath &&
-      (prevT.size !== stat.size || (prevT.mtimeMs != null && stat.mtimeMs > prevT.mtimeMs));
-
-    const { mtimeMs, size, parsed } = readTailLines(filePath, stat);
-    if (parsed.length === 0) return false;
-
-    const last = parsed[parsed.length - 1];
-    const lastPlanner = [...parsed].reverse().find((x) => x.type === "PLANNER_RESPONSE");
-    const hasUserExplicit = Boolean(prevT?.hasUserExplicit || parsed.some((x) => x.source === "USER_EXPLICIT"));
-    const parsedStepAt = last.created_at ? Date.parse(last.created_at) : NaN;
-    const latestRecordCreatedAt = Number.isFinite(parsedStepAt) ? parsedStepAt : null;
-    let latestStepAt = mtimeMs;
-    if (Number.isFinite(parsedStepAt)) {
-      latestStepAt =
-        fileActivelyUpdated || mtimeMs - parsedStepAt < 6 * 60 * 60 * 1000
-          ? Math.max(parsedStepAt, mtimeMs)
-          : parsedStepAt;
-    }
-
-    const isFresh = Date.now() - Math.max(latestStepAt || 0, mtimeMs) < 10 * 60 * 1000;
-    let inferredPhase = "idle";
-    let lastToolName = null;
-    if (lastPlanner?.tool_calls?.length) {
-      lastToolName = lastPlanner.tool_calls.map((t) => t.name).join(", ");
-    }
-
-    if (isFresh) {
-      if (last.type === "USER_INPUT" || last.type === "GENERIC" || last.type === "CODE_ACTION") {
-        inferredPhase = "waiting_llm";
-      } else if (last.type === "PLANNER_RESPONSE") {
-        if (last.tool_calls && last.tool_calls.length > 0) {
-          inferredPhase = "running_tool";
-        } else if (TERMINAL_PLANNER_STATUSES.has(String(last.status || "").toUpperCase())) {
-          inferredPhase = "idle";
-        } else {
-          inferredPhase = "waiting_llm";
-        }
-      }
-    }
-
+    const nextT = result.transcript;
     const conv = getOrCreateConv(convId);
     const changed =
-      conv.transcript.latestStepIndex !== last.step_index ||
-      conv.transcript.inferredPhase !== inferredPhase ||
+      conv.transcript.latestStepIndex !== nextT.latestStepIndex ||
+      conv.transcript.inferredPhase !== nextT.inferredPhase ||
       conv.transcript.conversationId !== convId ||
-      conv.transcript.size !== size ||
-      conv.transcript.latestStepAt !== latestStepAt;
+      conv.transcript.size !== nextT.size ||
+      conv.transcript.latestStepAt !== nextT.latestStepAt;
 
     if (
       recordTimeline &&
-      inferredPhase === "running_tool" &&
-      lastToolName &&
-      last.step_index != null &&
-      Date.now() - latestStepAt < 15000
+      nextT.inferredPhase === "running_tool" &&
+      result.lastToolName &&
+      result.lastStepIndex != null &&
+      now - result.latestStepAt < 15000
     ) {
-      const stepKey = `${convId}:${last.step_index}`;
+      const stepKey = `${convId}:${result.lastStepIndex}`;
       if (!loggedToolSteps.has(stepKey)) {
         if (loggedToolSteps.size > 200) loggedToolSteps.clear();
         loggedToolSteps.add(stepKey);
         const shortConv = convId && convId !== "default" ? `#${convId.slice(0, 6)}` : "";
         pushTimelineEvent(
           "tool",
-          `执行工具: ${lastToolName}`,
-          [shortConv, `Step #${last.step_index}`].filter(Boolean).join(" · "),
+          `执行工具: ${result.lastToolName}`,
+          [shortConv, `Step #${result.lastStepIndex}`].filter(Boolean).join(" · "),
           "info",
           convId,
-          { key: "TOOL_STEP", params: { tools: lastToolName, shortConv, stepIdx: last.step_index } },
+          { key: "TOOL_STEP", params: { tools: result.lastToolName, shortConv, stepIdx: result.lastStepIndex } },
         );
       }
     }
 
-    conv.transcript = {
-      conversationId: convId,
-      filePath,
-      mtimeMs,
-      size,
-      latestStepIndex: last.step_index ?? null,
-      latestStepType: last.type || null,
-      latestStepStatus: last.status || null,
-      latestStepAt,
-      latestRecordCreatedAt,
-      hasUserExplicit,
-      lastToolName,
-      tokens: lastPlanner
-        ? {
-            input: lastPlanner.input_tokens ?? null,
-            output: lastPlanner.output_tokens ?? null,
-            cacheRead: lastPlanner.cache_read_tokens ?? null,
-          }
-        : null,
-      inferredPhase,
-    };
-
+    conv.transcript = nextT;
     return changed;
   }
 
@@ -355,12 +133,12 @@ export function createStateStore({
       conv.hook?.phase &&
       conv.hook.phase !== "idle" &&
       conv.hook.lastEventAt &&
-      now - conv.hook.lastEventAt < 10 * 60 * 1000;
+      now - conv.hook.lastEventAt < ACTIVE_WINDOW_MS;
     const tActive =
       conv.transcript?.inferredPhase &&
       conv.transcript.inferredPhase !== "idle" &&
       conv.transcript.latestStepAt &&
-      now - conv.transcript.latestStepAt < 10 * 60 * 1000;
+      now - conv.transcript.latestStepAt < ACTIVE_WINDOW_MS;
     return Boolean(hActive || tActive);
   }
 
@@ -457,6 +235,29 @@ export function createStateStore({
     }
   }
 
+  function findNewestBrainTranscript() {
+    let newestPath = null;
+    let newestConvId = null;
+    let newestMtime = 0;
+
+    for (const brainDir of brainDirs) {
+      if (!existsSync(brainDir)) continue;
+      const dirs = readdirSync(brainDir, { withFileTypes: true });
+      for (const d of dirs) {
+        if (!d.isDirectory()) continue;
+        const p = resolveTranscriptLogPath(brainDir, d.name);
+        if (!p) continue;
+        const mtime = statSync(p).mtimeMs;
+        if (mtime > newestMtime) {
+          newestMtime = mtime;
+          newestPath = p;
+          newestConvId = d.name;
+        }
+      }
+    }
+    return { newestPath, newestConvId, newestMtime };
+  }
+
   function scanTranscript(requestedConvIds = null, recordTimeline = true, { fullScanIntervalMs = 0 } = {}) {
     try {
       let anyChanged = false;
@@ -492,25 +293,7 @@ export function createStateStore({
 
       if (shouldFullScan) {
         lastFullScanAt = now;
-        let newestPath = null;
-        let newestConvId = null;
-        let newestMtime = 0;
-
-        for (const brainDir of brainDirs) {
-          if (!existsSync(brainDir)) continue;
-          const dirs = readdirSync(brainDir, { withFileTypes: true });
-          for (const d of dirs) {
-            if (!d.isDirectory()) continue;
-            const p = resolveTranscriptLogPath(brainDir, d.name);
-            if (!p) continue;
-            const mtime = statSync(p).mtimeMs;
-            if (mtime > newestMtime) {
-              newestMtime = mtime;
-              newestPath = p;
-              newestConvId = d.name;
-            }
-          }
-        }
+        const { newestPath, newestConvId, newestMtime } = findNewestBrainTranscript();
 
         if (newestPath && newestConvId) {
           if (!scannedConvIds.has(newestConvId)) {
@@ -602,55 +385,29 @@ export function createStateStore({
     }
   }
 
-  function listFallbackFiles() {
-    const files = [];
-    if (resolvedFallbackHooksDir && existsSync(resolvedFallbackHooksDir)) {
-      try {
-        for (const name of readdirSync(resolvedFallbackHooksDir).sort()) {
-          if (name.endsWith(".json")) {
-            files.push(join(resolvedFallbackHooksDir, name));
-          }
-        }
-      } catch {
-      }
-    }
-    if (fallbackHookPath && existsSync(fallbackHookPath)) {
-      files.push(fallbackHookPath);
-    }
-    return files;
-  }
-
   function loadFallbackHookIfNewer() {
-    for (const filePath of listFallbackFiles()) {
-      try {
-        const record = JSON.parse(readFileSync(filePath, "utf8"));
-        if (!doesFallbackRecordMatchScope(record, { lsAddress })) continue;
-        const convId = record?.payload?.conversationId || "default";
-        const conv = getOrCreateConv(convId);
-        if (record?.receivedAt && (!conv.hook.lastEventAt || record.receivedAt > conv.hook.lastEventAt)) {
-          applyHookEvent(record, false);
-        }
-      } catch {
+    const records = readMatchingFallbackHooks({
+      fallbackHooksDir: resolvedFallbackHooksDir,
+      fallbackHookPath,
+      lsAddress,
+    });
+    for (const record of records) {
+      const convId = record?.payload?.conversationId || "default";
+      const conv = getOrCreateConv(convId);
+      if (record?.receivedAt && (!conv.hook.lastEventAt || record.receivedAt > conv.hook.lastEventAt)) {
+        applyHookEvent(record, false);
       }
     }
   }
 
   function clearFallbackHook(upToTs = Infinity, { conversationId = null, lsAddress: scopeLs = null } = {}) {
-    const targetLs = scopeLs ?? (lsAddress || null);
-    for (const filePath of listFallbackFiles()) {
-      try {
-        let shouldDelete = false;
-        const existing = JSON.parse(readFileSync(filePath, "utf8"));
-        if (doesFallbackRecordMatchScope(existing, { conversationId, lsAddress: targetLs })) {
-          shouldDelete =
-            !existing?.receivedAt || !Number.isFinite(upToTs) || existing.receivedAt <= upToTs;
-        }
-        if (shouldDelete) {
-          unlinkSync(filePath);
-        }
-      } catch {
-      }
-    }
+    clearMatchingFallbackHooks({
+      fallbackHooksDir: resolvedFallbackHooksDir,
+      fallbackHookPath,
+      upToTs,
+      conversationId,
+      lsAddress: scopeLs ?? (lsAddress || null),
+    });
   }
 
   function buildSnapshot({ probes, consecutiveFailures, ls, simulation, config, requestedConvId = null }) {

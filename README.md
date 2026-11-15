@@ -156,13 +156,20 @@ antigravity-status-monitor/
 ├── tests/                          # 单元测试与真实系统命令集成测试（node:test）
 └── sidecars/status-monitor/
     ├── sidecar.json                # Sidecar 注册配置
-    ├── server.mjs                  # HTTP 服务、安全校验、状态轮询/SSE 与调度
+    ├── server.mjs                  # Sidecar 入口、路由分发与生命周期组合
     ├── lib/
     │   ├── config.mjs              # 运行时路径与配置持久化
+    │   ├── runtime-paths.mjs       # 多窗口 .runtime/servers 与 hooks 作用域工具
+    │   ├── http-helpers.mjs        # 安全响应头、静态白名单与 JSON 收发
+    │   ├── sse-hub.mjs             # SSE 广播 hub 与多标签页钉选会话跟踪
+    │   ├── server-registry.mjs     # 多实例注册表与退出清理
+    │   ├── probe-coordinator.mjs   # 探针调度、LS 探查与桌面告警去重
     │   ├── i18n.mjs                # 中英文双语文案、事件与通知翻译
     │   ├── security.mjs            # CSRF 防护、Content-Type 与双令牌鉴权
     │   ├── sdk-bridge.mjs          # sidecar_sdk 桥接（/preload.js 与 AgentAPI）
-    │   ├── state-store.mjs         # 多会话状态隔离与 Transcript 解析
+    │   ├── transcript-reader.mjs   # Transcript 尾部读取与单文件阶段推断
+    │   ├── fallback-hooks.mjs      # 离线 Hook 降级文件加载与作用域清理
+    │   ├── state-store.mjs         # 多会话状态隔离、活跃会话跟随与快照汇总
     │   ├── verdict.mjs             # 纯函数状态诊断引擎
     │   ├── proxy.mjs               # 代理配置校验、Bypass/CIDR 与系统代理识别
     │   ├── process-probe.mjs       # Language Server 进程、端口与路由探查
@@ -172,7 +179,12 @@ antigravity-status-monitor/
     └── public/
         ├── index.html
         ├── styles.css
-        └── app.js
+        ├── app.js                  # 面板入口装配、事件绑定与按钮锁
+        └── js/
+            ├── i18n.js             # 前端双语词典与静态文本翻译
+            ├── format.js           # 时间/Token 格式化与主题自适应
+            ├── render.js           # 延迟曲线 SVG、时间线与各状态卡片渲染
+            └── client.js           # 鉴权请求、自适应短轮询与错条管理
 ```
 
 ---

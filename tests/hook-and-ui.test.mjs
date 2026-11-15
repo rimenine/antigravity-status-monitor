@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import http from "node:http";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { runInNewContext } from "node:vm";
+import { createContext, runInContext } from "node:vm";
 import { packageRelease } from "../scripts/package-release.mjs";
 import { createSdkBridge } from "../sidecars/status-monitor/lib/sdk-bridge.mjs";
 import { createStatusServer } from "../sidecars/status-monitor/server.mjs";
@@ -213,17 +213,25 @@ describe("hooks/hook-reporter.mjs（事件上报与降级写入）", () => {
 });
 
 describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
-  it("app.js 引用的全部 DOM ID 均存在于 index.html", () => {
-    const html = readFileSync(
-      join(PLUGIN_ROOT, "sidecars/status-monitor/public/index.html"),
-      "utf8",
+  it("前端模块化脚本引用的全部 DOM ID 均存在于 index.html", () => {
+    const publicDir = join(PLUGIN_ROOT, "sidecars/status-monitor/public");
+    const html = readFileSync(join(publicDir, "index.html"), "utf8");
+    const scriptMatches = [...html.matchAll(/<script\s+src="\/([^"]+)"\s+defer><\/script>/g)].map(
+      (m) => m[1],
     );
-    const appJs = readFileSync(
-      join(PLUGIN_ROOT, "sidecars/status-monitor/public/app.js"),
-      "utf8",
-    );
+    assert.deepEqual(scriptMatches, [
+      "js/i18n.js",
+      "js/format.js",
+      "js/render.js",
+      "js/client.js",
+      "app.js",
+    ]);
+
+    const frontendCode = scriptMatches
+      .map((rel) => readFileSync(join(publicDir, rel), "utf8"))
+      .join("\n");
     const htmlIds = new Set([...html.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
-    const jsIds = [...new Set([...appJs.matchAll(/\$\("([^"]+)"\)/g)].map((m) => m[1]))];
+    const jsIds = [...new Set([...frontendCode.matchAll(/\$\("([^"]+)"\)/g)].map((m) => m[1]))];
     const missing = jsIds.filter((id) => !htmlIds.has(id));
     assert.deepEqual(missing, []);
     assert.ok(jsIds.length >= 22);
@@ -232,16 +240,16 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.doesNotMatch(html, /var\(--(accent|ok|tool)\)/);
     assert.ok(htmlIds.has("btnLangZh") && htmlIds.has("btnLangEn"));
     assert.ok(htmlIds.has("actionBanner") && htmlIds.has("convSelect"));
-    assert.match(appJs, /netRetry/);
-    assert.match(appJs, /modePacUnsupported/);
-    assert.match(appJs, /updateConnectionDot/);
-    assert.match(appJs, /detectBrowserLang/);
-    assert.match(appJs, /navigator\.language/);
-    assert.doesNotMatch(appJs, /\bEventSource\b/);
-    assert.match(appJs, /visibilityState/);
-    assert.match(appJs, /AbortController/);
-    assert.match(appJs, /X-Sidecar-Token/);
-    assert.doesNotMatch(appJs, /\.cssText\s*=/);
+    assert.match(frontendCode, /netRetry/);
+    assert.match(frontendCode, /modePacUnsupported/);
+    assert.match(frontendCode, /updateConnectionDot/);
+    assert.match(frontendCode, /detectBrowserLang/);
+    assert.match(frontendCode, /navigator\.language/);
+    assert.doesNotMatch(frontendCode, /\bEventSource\b/);
+    assert.match(frontendCode, /visibilityState/);
+    assert.match(frontendCode, /AbortController/);
+    assert.match(frontendCode, /X-Sidecar-Token/);
+    assert.doesNotMatch(frontendCode, /\.cssText\s*=/);
 
     const stylesCss = readFileSync(
       join(PLUGIN_ROOT, "sidecars/status-monitor/public/styles.css"),
@@ -516,8 +524,14 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         payload: { conversationId: "conv-busy", invocationNum: 5 },
       });
 
-      const html = readFileSync(join(PLUGIN_ROOT, "sidecars/status-monitor/public/index.html"), "utf8");
-      const appJs = readFileSync(join(PLUGIN_ROOT, "sidecars/status-monitor/public/app.js"), "utf8");
+      const publicDir = join(PLUGIN_ROOT, "sidecars/status-monitor/public");
+      const html = readFileSync(join(publicDir, "index.html"), "utf8");
+      const scriptFiles = ["js/i18n.js", "js/format.js", "js/render.js", "js/client.js", "app.js"].map(
+        (rel) => ({
+          filename: rel,
+          code: readFileSync(join(publicDir, rel), "utf8"),
+        }),
+      );
 
       const makeEl = (tag = "div") => {
         const classes = new Set();
@@ -687,7 +701,10 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       };
 
       try {
-        runInNewContext(appJs, sandbox);
+        const vmContext = createContext(sandbox);
+        for (const mod of scriptFiles) {
+          runInContext(mod.code, vmContext, { filename: mod.filename });
+        }
 
         // 1. 首屏绑定当前空闲会话 conv-idle
         await waitUntil(() => elements.get("verdictBadge").textContent.includes("IDLE"));

@@ -130,6 +130,15 @@ describe("server HTTP 端到端集成测试", () => {
         assert.match(jsRes.body, /pollStatus/);
         assert.doesNotMatch(jsRes.body, /\bnew EventSource\b/);
 
+        for (const subPath of ["/js/i18n.js", "/js/format.js", "/js/render.js", "/js/client.js"]) {
+          const subRes = await httpRequest(port, "GET", subPath);
+          assert.equal(subRes.status, 200);
+          assert.equal(subRes.headers["content-security-policy"], "default-src 'self'; connect-src 'self'");
+          assert.match(subRes.headers["content-type"], /application\/javascript/);
+        }
+        const traversalRes = await httpRequest(port, "GET", "/js/../server.mjs");
+        assert.equal(traversalRes.status, 404);
+
         const unauthStatus = await httpRequest(port, "GET", "/api/status?conversationId=unauth-conv");
         assert.equal(unauthStatus.status, 401);
 

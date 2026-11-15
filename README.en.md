@@ -156,13 +156,20 @@ antigravity-status-monitor/
 ├── tests/                          # Unit and real-process integration tests (node:test)
 └── sidecars/status-monitor/
     ├── sidecar.json                # Sidecar registration manifest
-    ├── server.mjs                  # HTTP server, security guard, status polling/SSE & scheduler
+    ├── server.mjs                  # Sidecar entrypoint, HTTP routing & lifecycle wiring
     ├── lib/
     │   ├── config.mjs              # Runtime paths and config persistence
+    │   ├── runtime-paths.mjs       # Multi-window .runtime/servers & hooks scope helpers
+    │   ├── http-helpers.mjs        # Security headers, static asset whitelist & JSON I/O
+    │   ├── sse-hub.mjs             # SSE broadcast hub & pinned conversation tracking
+    │   ├── server-registry.mjs     # Multi-instance registration & exit cleanup
+    │   ├── probe-coordinator.mjs   # Probe scheduler, LS inspection & alert dedup
     │   ├── i18n.mjs                # Chinese/English localization strings & verdict copy
     │   ├── security.mjs            # CSRF, Origin, Content-Type & dual-token verification
     │   ├── sdk-bridge.mjs          # sidecar_sdk bridge (/preload.js & AgentAPI)
-    │   ├── state-store.mjs         # Multi-conversation isolation & transcript parser
+    │   ├── transcript-reader.mjs   # Transcript tail-chunk reader & phase inference
+    │   ├── fallback-hooks.mjs      # Scoped offline fallback hook loader & cleanup
+    │   ├── state-store.mjs         # Multi-conversation isolation & snapshot builder
     │   ├── verdict.mjs             # Pure state diagnosis engine
     │   ├── proxy.mjs               # Proxy config parsing, Bypass/CIDR & OS proxy detection
     │   ├── process-probe.mjs       # Language Server PID, 443 socket & route inspection
@@ -172,7 +179,12 @@ antigravity-status-monitor/
     └── public/
         ├── index.html
         ├── styles.css
-        └── app.js
+        ├── app.js                  # Dashboard bootstrap & UI event bindings
+        └── js/
+            ├── i18n.js             # Frontend zh/en dictionaries & static i18n
+            ├── format.js           # Duration/token formatters & adaptive theme resolver
+            ├── render.js           # Sparkline SVG, timeline & telemetry card renderers
+            └── client.js           # Auth transport, adaptive polling & error banner
 ```
 
 ---
