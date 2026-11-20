@@ -46,6 +46,10 @@ const VERDICT_COPY = {
       headline: "真实工作中 · 本地执行工具",
       summary: `正在执行 ${toolLabel || "本地工具"}（本地任务阶段，不依赖 VPN 上游流）。`,
     }),
+    BACKGROUND_TASK: ({ elapsedSec }) => ({
+      headline: "后台任务运行中 · 等待回调唤醒",
+      summary: `本轮回复已暂告结束，仍有后台命令或子代理在运行（已等待 ${elapsedSec}s），完成后 Antigravity 将自动继续回复。`,
+    }),
     OFFLINE_IDLE: () => ({
       headline: "空闲待命 · VPN / 网络未连接",
       summary: "当前无进行中任务，但上游网络探测失败，发送新消息前请先恢复 VPN。",
@@ -105,6 +109,10 @@ const VERDICT_COPY = {
       headline: "Working · Running Local Tool",
       summary: `Executing ${toolLabel || "local tool"} (local step, does not depend on the upstream stream).`,
     }),
+    BACKGROUND_TASK: ({ elapsedSec }) => ({
+      headline: "Background Task · Waiting for Wakeup",
+      summary: `Current turn paused while a background command or subagent is still running (${elapsedSec}s). Antigravity will auto-resume and reply once it finishes.`,
+    }),
     OFFLINE_IDLE: () => ({
       headline: "Idle · Upstream Unreachable",
       summary: "No active turn, but upstream probes failed. Check network or proxy before sending a prompt.",
@@ -143,6 +151,10 @@ const EVENT_COPY = {
     HOOK_STOP: ({ reason, error, shortConv }) => ({
       title: `回合结束 (${reason})`,
       detail: error || shortConv || "",
+    }),
+    HOOK_STOP_BACKGROUND: ({ shortConv }) => ({
+      title: "回合暂歇 · 后台任务运行中",
+      detail: [shortConv, "完成后将自动继续回复"].filter(Boolean).join(" · "),
     }),
     NET_RECOVERED: ({ latencyMs }) => ({
       title: "VPN / 上游网络已恢复",
@@ -185,6 +197,10 @@ const EVENT_COPY = {
     HOOK_STOP: ({ reason, error, shortConv }) => ({
       title: `Turn Finished (${reason})`,
       detail: error || shortConv || "",
+    }),
+    HOOK_STOP_BACKGROUND: ({ shortConv }) => ({
+      title: "Turn Paused · Background Task Running",
+      detail: [shortConv, "Will auto-resume when finished"].filter(Boolean).join(" · "),
     }),
     NET_RECOVERED: ({ latencyMs }) => ({
       title: "Upstream Connection Restored",

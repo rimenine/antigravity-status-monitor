@@ -316,6 +316,16 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
       const isolatedAppData = join(sandbox, "appdata");
       mkdirSync(join(isolatedAppData, "brain"), { recursive: true });
 
+      const startHealthServer = () =>
+        new Promise((resolveSrv) => {
+          const srv = http.createServer((_req, res) => {
+            res.writeHead(200, { "Content-Type": "application/json" });
+            res.end('{"status":"ok"}');
+          });
+          srv.listen(0, "127.0.0.1", () => resolveSrv(srv));
+        });
+      const [lsSrv1, lsSrv2] = await Promise.all([startHealthServer(), startHealthServer()]);
+
       const spawnSidecar = (lsAddr) => {
         const childEnv = {
           ...process.env,
@@ -333,8 +343,8 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         });
       };
 
-      const sidecarProc1 = spawnSidecar("127.0.0.1:45111");
-      const sidecarProc2 = spawnSidecar("127.0.0.1:45222");
+      const sidecarProc1 = spawnSidecar(`127.0.0.1:${lsSrv1.address().port}`);
+      const sidecarProc2 = spawnSidecar(`127.0.0.1:${lsSrv2.address().port}`);
 
       try {
         const deadline = Date.now() + 8000;
@@ -364,6 +374,7 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         assert.ok(stopMatches.length >= 2, `Expected >=2 sidecars stopped, stdout: ${uninstRes.stdout}`);
         assert.equal(existsSync(destDir), false);
       } finally {
+        for (const srv of [lsSrv1, lsSrv2]) srv.close();
         for (const p of [sidecarProc1, sidecarProc2]) {
           try {
             p.kill("SIGKILL");
@@ -532,6 +543,11 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         eventName: "PreInvocation",
         receivedAt: now - 57_000,
         payload: { conversationId: "conv-err-ui", invocationNum: 1 },
+      });
+      app.store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: now - 8_000,
+        payload: { conversationId: "conv-bg-ui", terminationReason: "NO_TOOL_CALL", fullyIdle: false },
       });
       writeJsonl(join(dir, "brain", "conv-err-ui", ".system_generated/logs/transcript.jsonl"), [
         {
@@ -765,6 +781,13 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         await waitUntil(() => elements.get("verdictBadge").textContent.includes("RETRY"));
         assert.match(elements.get("verdictBadge").textContent, /RETRY · 接口报错/);
         assert.match(elements.get("agentLogAge").textContent, /API 报错 #1 · \d+s 前写入/);
+
+        // 4c. 切换到后台任务运行中的 conv-bg-ui 时，前端正确渲染 BACKGROUND · 后台任务与后台等待秒数
+        winObj.sidecar.conversationId = "conv-bg-ui";
+        winObj.emit("focus");
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("BACKGROUND"));
+        assert.match(elements.get("verdictBadge").textContent, /BACKGROUND · 后台任务/);
+        assert.match(elements.get("agentLogAge").textContent, /后台任务 · \d+s 前/);
 
         // 5. 切到隐藏页签后停止轮询请求，防止后台窗口耗尽 HTTP/1.1 6 连接池
         docObj.visibilityState = "hidden";

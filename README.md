@@ -20,16 +20,18 @@
 
 单看主界面的加载动画很难判断卡在哪一步，插件把四路直接信号拼在一起判断：
 
-1. **Lifecycle Hooks + Transcript 日志联动计时与 API 重试识别**
+1. **Lifecycle Hooks + Transcript 阶段推断、后台任务与 API 重试识别**
    - [hooks.json](hooks.json) 只挂载 `PreInvocation` 与 `Stop` 两个关键事件（默认优先调用内置 `agy-node`，没装全局 Node 也能跑）；
-   - 只要 `transcript.jsonl` 有新输出，或者有新 Hook 进来，等待计时就会立刻归零——不会把正常的多工具长任务误判成卡死；
-   - 同时实时解析 `transcript.jsonl` 中的 `ERROR_MESSAGE`（如 `wsasend` 上传连接重置、`EOF`、`stream idle timeout`、`model unreachable`）及常见中间步骤：一旦遇到大上下文上传断连或上游流报错进入后台重试，即使轻探针仍绿灯，面板也会立即标出 `RETRY · 接口报错` 并同步到本对话事件流，给出 `/compact` 压缩上下文或切换代理节点建议，不再误报为空闲。
-2. **双链路 HTTPS 短连接探针（直连/TUN vs 代理）**
-   - 按设定周期分别走直连和代理测一次短连接可达性（默认探测 `https://daily-cloudcode-pa.googleapis.com`），支持自动读取环境变量/系统代理，也可以在设置里手动填写 HTTP `Basic` 或无认证 SOCKS5 代理，再结合宿主 `Language Server` 的 443 端口连接状态一起判断链路是否正常。
+   - **后台任务待唤醒（`BACKGROUND_TASK`）**：当本轮对话暂告结束但仍有后台命令/子代理未完成时，识别 `Stop` Hook 的 `fullyIdle: false`（以及 `transcript.jsonl` 未闭合后台任务兜底），展示「后台任务运行中 · 等待回调唤醒」，既不再误显示 `IDLE`，也不触发 `25s` 卡顿告警，待后台结束后自动随二次唤醒回归正常流程；
+   - **并行多工具进度与异常中止识别**：当单轮并发调用多个工具（如多个 `read_file` + `run_command`）且仅有部分快速工具回写结果时，仍保持 `WORKING · 工具`；若 `PLANNER_RESPONSE` 带 `tool_calls` 却以 `CANCELLED`/`ERROR` 异常中止，则直接回到 `IDLE`；
+   - 只要 `transcript.jsonl` 有新输出或有新 Hook 进来，等待计时就会立刻归零；同时实时解析 `ERROR_MESSAGE`（`wsasend` 上传重置、`EOF`、`stream idle timeout`、`model unreachable`，3 分钟独立过期）及常见中间步骤，在轻探针仍绿灯但接口报错重试时直接标出 `RETRY · 接口报错` 并同步到本对话事件流。
+2. **双链路 HTTPS 短连接探针（直连/TUN vs 代理）与分层防抖**
+   - 按设定周期分别走直连和代理测一次短连接可达性（默认探测 `https://daily-cloudcode-pa.googleapis.com`，默认单次超时 `4000ms`），支持自动读取环境变量/系统代理与手动 HTTP `Basic` / 无认证 SOCKS5 代理，再结合宿主 `Language Server` 的 443 端口连接状态一起判断链路；
+   - **分层防抖 + 混合路由纠偏 + 休眠保护**：硬断连（`ENOTFOUND`/`ECONNREFUSED`/HTTP 阻断）连续 2 次触发 `DISCONNECTED_HANG`，而纯慢超时（如 `2.5s~4s` 边缘波动）第 2 次先进入 `NET_SUSPECT` 复测、连续 3 次才升为断网挂起；若 `LS` 存在活跃代理连接且代理探针通畅而直连不通，优先采信代理链路（避免因零星直连或 `100.64.0.0/10` 运营商 CGNAT 误判成直连/TUN）；系统休眠唤醒产生的时间跳变会自动清零历史失败计数；
    - **自适应短连接轮询 + 严格本对话隔离**：面板前台每 1 秒通过 `/api/status` 拉取状态（`~2ms` 用完即释放连接，切到后台自动暂停并释放连接槽位，彻底避免多个 Sidecar 标签长期占满 Chromium 6 条 HTTP/1.1 连接上限导致新面板转圈或按钮无响应）。前端无任何对话切换选项，服务端也彻底移除 `auto` 切换与跨目录抢占逻辑，每个对话均使用物理分桶的实时事件流，仅展示本对话的 Hooks、工具步骤、演练预警与网络变更，随宿主切换对话时同步切换；服务端仍保留 `/api/events` SSE 接口供外部按需订阅。
-3. **宿主进程追踪、分因告警与自动退出**
-   - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；如果 Antigravity 已经关掉且 `/healthz` 连续连不上，Sidecar 会自动退出，不在后台留孤儿进程；
-   - **分因桌面弹窗 + 本地有界故障日志**：触发桌面告警时严格区分 **VPN / 上游网络断开** 与 **Language Server 失联** 两类提示文案（避免把宿主失联误报成 VPN 断开），并将关键断网、失联与恢复事件持久化到 `.runtime/alerts.log`（有界 JSONL，自动裁剪）供事后排查。
+3. **宿主进程追踪、分因告警防抖与自动退出**
+   - 优先按 `ANTIGRAVITY_LS_ADDRESS` 定位当前对应的宿主 `Language Server` 进程；进程退出立刻告警，进程存活时的 `/healthz` 检测（单次超时 `3000ms`）与高负载下带健康连接的孤立 `SYN_SENT` 均需连续 2 轮确认后才告警；若 Antigravity 关掉且 `/healthz` 连续 3 次不可达，Sidecar 会自动退出；
+   - **多会话告警评估 + 有界故障日志**：探测周期遍历当前钉选/首选活跃会话以防漏报后台对话挂起，严格区分 **VPN / 上游网络断开** 与 **Language Server 失联** 两类桌面通知文案，并将包含 `convId` 与 `message` 的完整故障/恢复记录持久化到 `.runtime/alerts.log`（有界 JSONL，自动裁剪）供事后排查。
 4. **默认全接口认证 + DNS 重绑定防护 + 严格 CSP 锁定**
    - 仅监听 `127.0.0.1`，并在 HTTP 入口校验 `Host` 头仅允许回环地址（`127.0.0.1` / `localhost` / `[::1]`），直接拦截 DNS 重绑定探测；
    - **所有 `GET /api/*` 与 `POST /api/*` 默认强制鉴权**：即使脱离宿主独立运行（未设置 `ANTIGRAVITY_SIDECAR_UI_TOKEN`），启动时也会自动生成随机 48 位 hex `uiToken`（并在控制台输出带 `?token=...` 的本机访问链接）；同时校验 `Sec-Fetch-Site`（拦截 `cross-site`）与 `Origin`（拦截 `Origin: null` 与外部域），`POST` 额外强制 `Content-Type: application/json`，Hook 上报使用独立的随机 `X-Hook-Token`（`.runtime/server.json` 不写入 `uiToken`）；
@@ -42,7 +44,8 @@
 这只是一个轻量的 Sidecar 状态面板，并非内核级抓包工具，以下边界需要注意：
 
 * **新建短探针能通 ≠ 旧的长连接还活着**：网络探针是周期性新建 HTTPS GET 短连接测试域名 / TLS / HTTP 是否通畅（`2xx/3xx` 及 `400/404/405/410` 视为上游有响应，因为 `daily-cloudcode-pa.googleapis.com` 根路径默认返回 `404`；`401/403/407/408/429/451` 与 `5xx` 均判定为阻塞或失败）。如果只是代理节点波动导致**原本那条流式长连接或大包上传（`wsasend`）被远端重置**，在 Antigravity 写入 `ERROR_MESSAGE` 重试日志后，面板会立即标出 `RETRY · 接口报错`；若请求仍完全静默阻塞且尚未落盘报错、而新建探针刚好成功，则会倾向显示“网络正常 / 疑似模型卡顿”。
-* **代理与 TUN 识别覆盖范围**：支持环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`）、Windows 注册表 `HKCU`/`HKLM`（含 `ProxyOverride` 绕过列表与 `DefaultConnectionSettings` 开关校验）、macOS `scutil`（含 `ExceptionsList`）、Linux GNOME `gsettings`（含 `ignore-hosts`）中的 **HTTP 代理**（含基础 `Basic` 鉴权）与**无认证 SOCKS5 代理**，并支持设置面板里的**「手动代理」**兜底（适合 PAC、非 GNOME 桌面、纯 SOCKS5 等场景）；**暂不支持解析 PAC 脚本（会给提示）、`https://`/`socks4://` 代理、带密码的 SOCKS5、企业 NTLM 域认证或按进程注入式透明分流工具；公司网关若使用了未导入 Node 信任链的中间人自签根证书，也可能报 TLS 失败**。TUN 网卡基于 `198.18.0.0/15`（Fake-IP）与 `100.64.0.0/10`（CGNAT / Tailscale / WireGuard 等常见段）做启发式归类。
+* **代理与 TUN 识别覆盖范围**：支持环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`）、Windows 注册表 `HKCU`/`HKLM`（含 `ProxyOverride` 绕过列表与 `DefaultConnectionSettings` 开关校验）、macOS `scutil`（含 `ExceptionsList`）、Linux GNOME `gsettings`（含 `ignore-hosts`）中的 **HTTP 代理**（含基础 `Basic` 鉴权）与**无认证 SOCKS5 代理**，并支持设置面板里的**「手动代理」**兜底（适合 PAC、非 GNOME 桌面、纯 SOCKS5 等场景）；**暂不支持解析 PAC 脚本（会给提示）、`https://`/`socks4://` 代理、带密码的 SOCKS5、企业 NTLM 域认证或按进程注入式透明分流工具；公司网关若使用了未导入 Node 信任链的中间人自签根证书，也可能报 TLS 失败**。TUN 网卡基于 `198.18.0.0/15`（Fake-IP）与 `100.64.0.0/10`（CGNAT / Tailscale / WireGuard 等常见段）做启发式归类；若同时存在活跃代理连接且仅代理探针通畅，插件会自动纠偏优先采用代理探测结果（避免因运营商宽带也使用 `100.64.0.0/10` 而误判）。
+* **超时阈值与高思考强度模型**：默认单次网络探测超时为 `4000ms`（纯超时需连续 `3` 次才触发断网挂起，硬错误连续 `2` 次触发）；Antigravity 通常在整轮思考/回复生成完毕后才落盘 `PLANNER_RESPONSE`，因此使用高思考强度模型单轮耗时超过 `25s` 属正常现象，可在设置中将卡顿预警阈值调至 `45s`。
 * **Hooks 与常驻开销**：Antigravity 每次 `PreInvocation` / `Stop` 时会拉起一次短暂的轻量 Hook 进程；Sidecar 本身为常驻本地 Node 进程。
 * **本地接口访问范围**：即使仅绑定 `127.0.0.1`，全部 `GET /api/*`（含 `/api/status`、`/api/events`）与 `POST /api/*` 均默认强制校验 `X-Sidecar-Token`（或 SSE 使用的 `?token=`）、`Host` 回环白名单、`Sec-Fetch-Site` 与 `Origin`；未授权网页或未携带 Token 的本机请求会被直接拦截（`401`/`403`）。
 * **Token 统计口径**：`total` 直接累加 `input_tokens + cache_read_tokens + output_tokens` 的原始次数，用来直观感受工作量与缓存命中趋势即可，不能直接等同于官方计费或配额扣减；当前会话优先走 Hook 上报路径，全量历史统计扫描 `transcript.jsonl`（不存在时回退 `transcript_full.jsonl`）。
@@ -171,7 +174,8 @@ antigravity-status-monitor/
     │   ├── i18n.mjs                # 中英文双语文案、分因通知与事件翻译
     │   ├── security.mjs            # CSRF 防护、Content-Type 与双令牌鉴权
     │   ├── sdk-bridge.mjs          # sidecar_sdk 桥接（/preload.js 与 AgentAPI）
-    │   ├── transcript-reader.mjs   # Transcript 尾部读取与单文件阶段推断
+    │   ├── transcript-phase.mjs    # 步骤阶段推断、并行工具/后台任务及错误分类纯函数
+    │   ├── transcript-reader.mjs   # Transcript 尾部读取、时钟窗校验与快照解析
     │   ├── fallback-hooks.mjs      # 离线 Hook 降级文件加载与作用域清理
     │   ├── timeline-store.mjs      # 按会话物理分桶的时间线事件仓库
     │   ├── state-store.mjs         # 严格单对话状态锁定与快照汇总

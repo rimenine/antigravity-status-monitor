@@ -664,4 +664,69 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       assert.equal(snapRecovered.verdict.code, "IDLE");
     });
   });
+
+  it("Stop(fullyIdle: false) 切入 background_task 并隔离事件流、ERROR_MESSAGE 3 分钟过期、2 分钟时钟窗防旧日志激活", async () => {
+    await withTempDir(async (dir) => {
+      const brainDir = join(dir, "brain");
+      const store = createStateStore({
+        brainDirs: [brainDir],
+        fallbackHookPath: join(dir, "hook-state.json"),
+      });
+
+      // 1. Stop(fullyIdle: false) -> background_task + HOOK_STOP_BACKGROUND；USER_CANCELED 则仍回 idle
+      const now = Date.now();
+      store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: now - 3000,
+        payload: { conversationId: "conv-bg-1", invocationNum: 1 },
+      });
+      assert.equal(store.resolveActiveConversation("conv-bg-1").hook.fullyIdle, null);
+
+      store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: now,
+        payload: { conversationId: "conv-bg-1", terminationReason: "NO_TOOL_CALL", fullyIdle: false },
+      });
+      const snapBg = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 80 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "zh" },
+        requestedConvId: "conv-bg-1",
+      });
+      assert.equal(snapBg.hook.phase, "background_task");
+      assert.equal(snapBg.hook.fullyIdle, false);
+      assert.equal(snapBg.verdict.code, "BACKGROUND_TASK");
+      assert.ok(snapBg.events.some((e) => e.i18n?.key === "HOOK_STOP_BACKGROUND"));
+
+      store.applyHookEvent({
+        eventName: "Stop",
+        receivedAt: now + 1000,
+        payload: { conversationId: "conv-bg-cancel", terminationReason: "USER_CANCELED", fullyIdle: false },
+      });
+      assert.equal(store.resolveActiveConversation("conv-bg-cancel").hook.phase, "idle");
+
+      // 2. ERROR_MESSAGE 超过 3 分钟即触发 stale-idle（无需等 10 分钟），新文件若 created_at > 3m 也不残留 latestError
+      const errConv = "conv-err-3m";
+      const errPath = join(brainDir, errConv, ".system_generated/logs/transcript.jsonl");
+      const age3m20 = new Date(Date.now() - 200_000);
+      writeJsonl(errPath, [
+        { step_index: 5, type: "ERROR_MESSAGE", error: 'API error (attempt 1): Post "https://example.invalid": EOF', created_at: age3m20.toISOString() },
+      ]);
+      utimesSync(errPath, age3m20, age3m20);
+      store.scanTranscript(errConv, false);
+      assert.equal(store.resolveActiveConversation(errConv).transcript.inferredPhase, "idle");
+      assert.equal(store.resolveActiveConversation(errConv).transcript.latestError, null);
+
+      // 3. 2 小时前旧 USER_INPUT 即使 mtime 被外部程序刷新也不误激活为 waiting_llm
+      const oldConv = "conv-touched-mtime";
+      const oldPath = join(brainDir, oldConv, ".system_generated/logs/transcript.jsonl");
+      writeJsonl(oldPath, [
+        { step_index: 1, type: "USER_INPUT", content: "old", created_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() },
+      ]);
+      store.scanTranscript(oldConv, false);
+      assert.equal(store.resolveActiveConversation(oldConv).transcript.inferredPhase, "idle");
+    });
+  });
 });

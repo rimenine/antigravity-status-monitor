@@ -6,7 +6,7 @@ import { normalizeIp, splitHostPort } from "./proxy.mjs";
 const execFileAsync = promisify(execFile);
 const endpointCache = new Map();
 
-function checkLsHealthz(lsAddress, timeoutMs = 2000) {
+function checkLsHealthz(lsAddress, timeoutMs = 3000) {
   return new Promise((resolve) => {
     if (!lsAddress) {
       resolve({ reachable: null, instanceId: null });

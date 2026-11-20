@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  ABORTED_PLANNER_STATUSES,
+  hasPendingBackgroundTask,
+  hasPendingParallelTools,
   inferTranscriptPhase,
   parseTranscriptError,
 } from "../sidecars/status-monitor/lib/transcript-reader.mjs";
@@ -109,6 +112,23 @@ describe("selectEffectiveProbe（主判定链路选择）", () => {
     assert.equal(res.activeRoute, "direct");
     assert.equal(res.proxyAddress, null);
     assert.equal(res.ok, true);
+  });
+
+  it("混合代理/CGNAT 路由且直连不通、代理通畅时优先采信 proxy 探测", () => {
+    const dual = {
+      direct: { ok: false, latencyMs: 4000, mode: "direct", error: "TIMEOUT" },
+      proxy: { ok: true, latencyMs: 210, mode: "proxy", proxyAddress: "127.0.0.1:7897" },
+      proxyConfig: { enabled: true, host: "127.0.0.1", port: 7897, source: "windows-registry" },
+    };
+    const res = selectEffectiveProbe({
+      dual,
+      ls: { route: "direct", tunDetected: true, proxyConns: 2 },
+      lastKnownLsRoute: null,
+      envProxy: null,
+    });
+    assert.equal(res.activeRoute, "proxy");
+    assert.equal(res.ok, true);
+    assert.equal(res.latencyMs, 210);
   });
 });
 
@@ -543,6 +563,119 @@ describe("computeVerdict（核心状态诊断引擎）", () => {
     });
     assert.equal(toolParseVerdict.code, "WAITING_LLM");
   });
+
+  it("BACKGROUND_TASK（fullyIdle: false）等待后台回调时不误报 IDLE 或卡顿，完成后自动恢复", () => {
+    const t0 = 1_700_000_000_000;
+    const bgActive = computeVerdict({
+      hook: { phase: "background_task", lastEvent: "Stop", lastEventAt: t0, fullyIdle: false },
+      transcript: { latestStepType: "PLANNER_RESPONSE", latestStepAt: t0 + 80, latestRecordCreatedAt: t0 - 200, inferredPhase: "idle" },
+      ls: { running: true, healthz: { reachable: true } },
+      probes: [{ ok: true, latencyMs: 110 }],
+      config: { stallThresholdSec: 25, lang: "zh" },
+      now: t0 + 6 * 60 * 1000,
+    });
+    assert.equal(bgActive.code, "BACKGROUND_TASK");
+    assert.equal(bgActive.severity, "tool");
+    assert.equal(bgActive.phase, "background_task");
+    assert.match(bgActive.headline, /后台任务/);
+
+    const bgEn = computeVerdict({
+      hook: { phase: "background_task", lastEvent: "Stop", lastEventAt: t0, fullyIdle: false },
+      ls: { running: true, healthz: { reachable: true } },
+      config: { lang: "en" },
+      now: t0 + 15_000,
+    });
+    assert.equal(bgEn.code, "BACKGROUND_TASK");
+    assert.match(bgEn.headline, /Background Task/);
+
+    const resumed = computeVerdict({
+      hook: { phase: "background_task", lastEvent: "Stop", lastEventAt: t0, fullyIdle: false },
+      transcript: {
+        latestStepType: "SYSTEM_MESSAGE",
+        latestStepAt: t0 + 20_000,
+        latestRecordCreatedAt: t0 + 20_000,
+        inferredPhase: "waiting_llm",
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      now: t0 + 21_000,
+    });
+    assert.equal(resumed.code, "WAITING_LLM");
+    assert.equal(resumed.source, "transcript");
+  });
+
+  it("纯慢超时、/healthz 单次抖动与带健康连接的孤立 SYN_SENT 均做防抖处理", () => {
+    const t0 = 1_700_000_000_000;
+    const hook = { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 };
+
+    const timeout2 = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: true, consecutiveFailures: 0 } },
+      probes: [
+        { ok: false, error: "请求超时" },
+        { ok: false, error: "请求超时" },
+      ],
+      consecutiveFailures: 2,
+      now: t0 + 8_000,
+    });
+    assert.equal(timeout2.code, "SUSPECT_STALL");
+    assert.equal(timeout2.messageKey, "NET_SUSPECT");
+
+    const timeout3 = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: true, consecutiveFailures: 0 } },
+      probes: [
+        { ok: false, error: "请求超时" },
+        { ok: false, error: "请求超时" },
+        { ok: false, error: "请求超时" },
+      ],
+      consecutiveFailures: 3,
+      now: t0 + 12_000,
+    });
+    assert.equal(timeout3.code, "DISCONNECTED_HANG");
+    assert.equal(timeout3.messageKey, "NET_DOWN_HANG");
+
+    const hardErr2 = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: true, consecutiveFailures: 0 } },
+      probes: [
+        { ok: false, error: "ENOTFOUND" },
+        { ok: false, error: "ENOTFOUND" },
+      ],
+      consecutiveFailures: 2,
+      now: t0 + 8_000,
+    });
+    assert.equal(hardErr2.code, "DISCONNECTED_HANG");
+
+    const healthz1 = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: false, consecutiveFailures: 1 } },
+      now: t0 + 4_000,
+    });
+    assert.equal(healthz1.code, "WAITING_LLM");
+
+    const healthz2 = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: false, consecutiveFailures: 2 } },
+      now: t0 + 9_000,
+    });
+    assert.equal(healthz2.code, "DISCONNECTED_HANG");
+    assert.equal(healthz2.messageKey, "LS_DOWN");
+
+    const synOnce = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: true }, established443: 4, synSent443: 1, synStallStreak: 1 },
+      now: t0 + 8_000,
+    });
+    assert.equal(synOnce.code, "WAITING_LLM");
+
+    const synTwice = computeVerdict({
+      hook,
+      ls: { running: true, healthz: { reachable: true }, established443: 4, synSent443: 1, synStallStreak: 2 },
+      now: t0 + 12_000,
+    });
+    assert.equal(synTwice.code, "SUSPECT_STALL");
+    assert.equal(synTwice.messageKey, "LS_SYN_STALL");
+  });
 });
 
 describe("transcript-reader 错误解析与阶段推断", () => {
@@ -610,11 +743,57 @@ describe("transcript-reader 错误解析与阶段推断", () => {
     assert.match(genericErr.shortReason, /HTTP 503 upstream busy/);
   });
 
-  it("inferTranscriptPhase 识别 ERROR_MESSAGE 与中间步骤并在过期时回退 idle", () => {
+  it("inferTranscriptPhase 识别 ERROR_MESSAGE、并行工具进度、异常中止工具态与未完成后台任务", () => {
     for (const type of ["ERROR_MESSAGE", "RUN_COMMAND", "SYSTEM_MESSAGE", "CHECKPOINT"]) {
       assert.equal(inferTranscriptPhase({ type }, true), "waiting_llm");
       assert.equal(inferTranscriptPhase({ type }, false), "idle");
     }
     assert.equal(inferTranscriptPhase({ type: "PLANNER_RESPONSE", status: "DONE" }, true), "idle");
+
+    for (const st of ABORTED_PLANNER_STATUSES) {
+      assert.equal(
+        inferTranscriptPhase({ type: "PLANNER_RESPONSE", status: st, tool_calls: [{ name: "run_command" }] }, true),
+        "idle",
+      );
+    }
+
+    const batchPlanner = {
+      type: "PLANNER_RESPONSE",
+      status: "DONE",
+      tool_calls: [{ name: "read_file" }, { name: "read_file" }, { name: "read_file" }, { name: "run_command" }],
+    };
+    const partialParsed = [
+      batchPlanner,
+      { type: "GENERIC", status: "DONE" },
+      { type: "GENERIC", status: "DONE" },
+      { type: "GENERIC", status: "DONE" },
+    ];
+    assert.equal(hasPendingParallelTools(partialParsed), true);
+    assert.equal(inferTranscriptPhase(partialParsed[partialParsed.length - 1], true, partialParsed), "running_tool");
+
+    const fullParsed = [...partialParsed, { type: "GENERIC", status: "DONE" }];
+    assert.equal(hasPendingParallelTools(fullParsed), false);
+    assert.equal(inferTranscriptPhase(fullParsed[fullParsed.length - 1], true, fullParsed), "waiting_llm");
+
+    const bgParsed = [
+      { type: "USER_INPUT", content: "run tests" },
+      { type: "PLANNER_RESPONSE", status: "DONE", tool_calls: [{ name: "run_command" }] },
+      {
+        type: "GENERIC",
+        status: "RUNNING",
+        content: "Tool is running as a background task with task id: conv/task-101",
+      },
+      { type: "PLANNER_RESPONSE", status: "DONE", content: "Waiting in background" },
+    ];
+    assert.equal(hasPendingBackgroundTask(bgParsed), true);
+    assert.equal(inferTranscriptPhase(bgParsed[bgParsed.length - 1], true, bgParsed), "background_task");
+
+    const bgFinishedParsed = [
+      ...bgParsed,
+      { type: "SYSTEM_MESSAGE", content: 'Task id "conv/task-101" finished with result' },
+      { type: "PLANNER_RESPONSE", status: "DONE", content: "All done" },
+    ];
+    assert.equal(hasPendingBackgroundTask(bgFinishedParsed), false);
+    assert.equal(inferTranscriptPhase(bgFinishedParsed[bgFinishedParsed.length - 1], true, bgFinishedParsed), "idle");
   });
 });

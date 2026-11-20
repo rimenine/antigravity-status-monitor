@@ -244,6 +244,7 @@ export function createStateStore({
 
     if (eventName === "PreInvocation") {
       h.phase = "waiting_llm";
+      h.fullyIdle = null;
       if (!h.turnStartedAt) h.turnStartedAt = receivedAt;
       h.terminationReason = null;
       h.error = null;
@@ -262,28 +263,46 @@ export function createStateStore({
         );
       }
     } else if (eventName === "Stop") {
-      h.phase = "idle";
+      const reason = payload.terminationReason || "DONE";
+      const isCanceled = /^(USER_CANCELED|USER_CANCELLED|CANCELLED|CANCELED)$/i.test(reason);
+      h.fullyIdle = typeof payload.fullyIdle === "boolean" ? payload.fullyIdle : null;
+      const isBackgroundActive = payload.fullyIdle === false && !isCanceled;
+      h.phase = isBackgroundActive ? "background_task" : "idle";
       h.turnStartedAt = null;
       h.toolName = null;
-      h.terminationReason = payload.terminationReason || "DONE";
+      h.terminationReason = reason;
       h.error = payload.error || null;
-      const isErr = payload.terminationReason === "ERROR" || Boolean(payload.error);
+      const isErr = reason === "ERROR" || Boolean(payload.error);
       if (recordTimeline) {
-        pushTimelineEvent(
-          "hook",
-          `回合结束 (${h.terminationReason})`,
-          h.error || shortConv,
-          isErr ? "error" : "success",
-          h.conversationId,
-          {
-            key: "HOOK_STOP",
-            params: {
-              reason: h.terminationReason,
-              error: h.error || "",
-              shortConv,
+        if (isBackgroundActive) {
+          pushTimelineEvent(
+            "hook",
+            "回合暂歇 · 后台任务运行中",
+            [shortConv, "完成后将自动继续回复"].filter(Boolean).join(" · "),
+            "active",
+            h.conversationId,
+            {
+              key: "HOOK_STOP_BACKGROUND",
+              params: { shortConv },
             },
-          },
-        );
+          );
+        } else {
+          pushTimelineEvent(
+            "hook",
+            `回合结束 (${h.terminationReason})`,
+            h.error || shortConv,
+            isErr ? "error" : "success",
+            h.conversationId,
+            {
+              key: "HOOK_STOP",
+              params: {
+                reason: h.terminationReason,
+                error: h.error || "",
+                shortConv,
+              },
+            },
+          );
+        }
       }
     }
   }

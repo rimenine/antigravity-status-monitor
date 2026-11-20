@@ -178,18 +178,32 @@ describe("security（CSRF 防护与双令牌鉴权）", () => {
 });
 
 describe("config（配置加载、边界限制与旧探测地址自动迁移）", () => {
-  it("自动将旧版 gstatic.com 探测地址迁移为 DEFAULT_PROBE_URL", async () => {
+  it("自动将旧版 gstatic.com 探测地址迁移为 DEFAULT_PROBE_URL，并将未迁移的默认 2500ms 超时平滑升至 4000ms", async () => {
     await withTempDir(async (dir) => {
       const cfgPath = join(dir, "config.json");
       writeFileSync(
         cfgPath,
-        JSON.stringify({ probeUrl: "https://www.gstatic.com/generate_204" }),
+        JSON.stringify({ probeUrl: "https://www.gstatic.com/generate_204", timeoutMs: 2500 }),
         "utf8",
       );
+
+      assert.equal(DEFAULT_CONFIG.timeoutMs, 4000);
+      assert.equal(DEFAULT_CONFIG.timeoutMigratedV3, true);
 
       const loaded = loadConfig(cfgPath);
       assert.equal(loaded.probeUrl, DEFAULT_PROBE_URL);
       assert.equal(loaded.probeUrlMigratedV2, true);
+      assert.equal(loaded.timeoutMs, 4000);
+      assert.equal(loaded.timeoutMigratedV3, true);
+
+      // 用户已迁移后显式设定为 2500ms 时，不应再次覆盖
+      const customPath = join(dir, "custom-timeout.json");
+      writeFileSync(
+        customPath,
+        JSON.stringify({ timeoutMs: 2500, timeoutMigratedV3: true, probeUrlMigratedV2: true }),
+        "utf8",
+      );
+      assert.equal(loadConfig(customPath).timeoutMs, 2500);
     });
   });
 

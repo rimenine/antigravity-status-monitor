@@ -243,6 +243,24 @@
     renderSparkline(probes);
   }
 
+  function formatHeartbeatAge(verdict, hook, transcript, d) {
+    const hasHookAge = hook.lastEvent && verdict.hookAgeSec != null;
+    const useHookAge =
+      hasHookAge && (verdict.silentSec == null || verdict.hookAgeSec <= verdict.silentSec);
+    const silentText = verdict.silentSec != null ? d.secAgo(verdict.silentSec) : d.noLog;
+    if (verdict.code === "BACKGROUND_TASK") {
+      return `${d.bgTaskLabel} · ${useHookAge ? d.hookAgo(verdict.hookAgeSec) : silentText}`;
+    }
+    if (transcript.latestStepType === "ERROR_MESSAGE" && transcript.latestError && !useHookAge) {
+      const tag = transcript.latestError.attempt != null ? d.apiErrAttempt(transcript.latestError.attempt) : d.apiErrLabel;
+      return `${tag} · ${silentText}`;
+    }
+    if (hook.lastEvent) {
+      return useHookAge ? `${hook.lastEvent} · ${d.hookAgo(verdict.hookAgeSec)}` : `${hook.lastEvent} · ${silentText}`;
+    }
+    return silentText;
+  }
+
   function renderTelemetryCards(data, d) {
     const { $, format } = ns;
     const { verdict, config, hook, transcript, ls, metrics } = data;
@@ -254,22 +272,7 @@
     );
     const stepNum = transcript.latestStepIndex ?? hook.stepIdx;
     format.setText("agentStepVal", stepNum != null ? `Step #${stepNum}` : d.waitActivity);
-    // 若最近 Hook 事件（如 PreInvocation）比旧对话日志更新，则优先展示 Hook 距今秒数，避免显示“PreInvocation · 120s 前写入”
-    const hasHookAge = hook.lastEvent && verdict.hookAgeSec != null;
-    const useHookAge =
-      hasHookAge && (verdict.silentSec == null || verdict.hookAgeSec <= verdict.silentSec);
-    const silentText = verdict.silentSec != null ? d.secAgo(verdict.silentSec) : d.noLog;
-    const hasApiError =
-      transcript.latestStepType === "ERROR_MESSAGE" && transcript.latestError;
-    const heartbeatText =
-      hasApiError && !useHookAge
-        ? `${transcript.latestError.attempt != null ? d.apiErrAttempt(transcript.latestError.attempt) : d.apiErrLabel} · ${silentText}`
-        : hook.lastEvent
-          ? useHookAge
-            ? `${hook.lastEvent} · ${d.hookAgo(verdict.hookAgeSec)}`
-            : `${hook.lastEvent} · ${silentText}`
-          : silentText;
-    format.setText("agentLogAge", heartbeatText);
+    format.setText("agentLogAge", formatHeartbeatAge(verdict, hook, transcript, d));
 
     const proxyCfg = latestProbe?.proxyConfig || data.proxyConfig;
     const isPacUnsupported = String(proxyCfg?.source || "").endsWith("pac-unsupported");
@@ -316,24 +319,10 @@
       $("netTargetVal").title = isPacUnsupported ? d.pacTooltip(proxyCfg?.pacUrl || "") : "";
     }
 
-    format.setText(
-      "lsHealthBadge",
-      ls.healthz?.reachable === true
-        ? "healthz OK"
-        : ls.running
-          ? d.lsRunning
-          : ls.running === null
-            ? d.lsUnavailable
-            : d.lsNotFound,
-    );
-    format.setText(
-      "lsConnVal",
-      ls.running === null
-        ? d.lsSkipped
-        : ls.running === false
-          ? d.lsStopped
-          : d.lsConns(ls.established443, ls.synSent443),
-    );
+    const hs = ls.healthz?.reachable === true ? "healthz OK" : ls.running ? d.lsRunning : ls.running === null ? d.lsUnavailable : d.lsNotFound;
+    format.setText("lsHealthBadge", hs);
+    const connText = ls.running === null ? d.lsSkipped : ls.running === false ? d.lsStopped : d.lsConns(ls.established443, ls.synSent443);
+    format.setText("lsConnVal", connText);
     const routeTag = d.routeTag[ls.route] || "";
     format.setText("lsPidVal", ls.pids?.length ? `PID: ${ls.pids.join(", ")}${routeTag}` : "PID: --");
   }
@@ -419,11 +408,5 @@
     format.setText("lastRefresh", d.syncTime(format.fmtTime(data.now)));
   }
 
-  ns.render = {
-    render,
-    renderSparkline,
-    renderTimeline,
-    showCfgError,
-    syncSettings,
-  };
+  ns.render = { render, renderSparkline, renderTimeline, showCfgError, syncSettings };
 })(globalThis.AsmUI = globalThis.AsmUI || {});

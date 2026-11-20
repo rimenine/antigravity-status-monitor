@@ -23,6 +23,7 @@ export function createProbeCoordinator({
   onHealthDead = () => {},
   onStateChanged = () => {},
   getPreferredConvId = () => null,
+  getPinnedConvIds = () => new Set(),
 } = {}) {
   const timers = [];
   let probeTimer = null;
@@ -30,11 +31,14 @@ export function createProbeCoordinator({
   let prevVerdictCode = "IDLE";
   let simBackupNotifyState = null;
   let lsHealthFailures = 0;
+  let lsSynStallStreak = 0;
   let inFlightProbe = null;
   let inFlightGen = -1;
   let configGeneration = 0;
   let lsEndpointsPid = null;
   let pacNotifiedUrl = null;
+  let activeGetPinnedConvIds = getPinnedConvIds;
+  let lastSchedulerTickAt = Date.now();
 
   function restoreNotifyStateAfterSim() {
     if (simBackupNotifyState) {
@@ -156,11 +160,7 @@ export function createProbeCoordinator({
         null,
         { key: "NET_RECOVERED", params: { latencyMs: result.latencyMs } },
       );
-      alertLogger?.append({
-        type: "NET_RECOVERED",
-        latencyMs: result.latencyMs,
-        convId: convId || null,
-      });
+      alertLogger?.append({ type: "NET_RECOVERED", latencyMs: result.latencyMs, convId: convId || null });
       return;
     }
 
@@ -174,24 +174,45 @@ export function createProbeCoordinator({
       null,
       { key: "NET_FAILED", params: { error: result.error || "" } },
     );
-    alertLogger?.append({
-      type: "NET_FAILED",
-      error: result.error || "超时",
-      convId: convId || null,
-    });
+    alertLogger?.append({ type: "NET_FAILED", error: result.error || "超时", convId: convId || null });
   }
 
-  function maybeDispatchHangAlert(activeConv, result) {
-    const verdict = computeVerdict({
-      hook: activeConv.hook,
-      transcript: activeConv.transcript,
-      ls: runtime.ls,
-      probes: runtime.probes,
-      consecutiveFailures: runtime.consecutiveFailures,
-      simulation: runtime.simulation,
-      config,
-    });
+  function resolveConvId(conv, fallbackId = null) {
+    return conv?.hook?.conversationId || conv?.transcript?.conversationId || fallbackId || null;
+  }
 
+  function pickAlertCandidate(simConvId = null) {
+    const preferredId = simConvId || getPreferredConvId() || null;
+    const pinned = typeof activeGetPinnedConvIds === "function" ? [...(activeGetPinnedConvIds() || [])] : [];
+    const candidateIds = simConvId
+      ? [simConvId]
+      : [...new Set([preferredId, ...pinned].filter(Boolean))];
+    if (candidateIds.length === 0) candidateIds.push(null);
+
+    let fallback = null;
+    for (const cid of candidateIds) {
+      const conv = store.resolveActiveConversation(cid);
+      const scopedSim =
+        runtime.simulation?.active && (!runtime.simulation.convId || runtime.simulation.convId === cid)
+          ? runtime.simulation
+          : { active: false };
+      const verdict = computeVerdict({
+        hook: conv.hook,
+        transcript: conv.transcript,
+        ls: runtime.ls,
+        probes: runtime.probes,
+        consecutiveFailures: runtime.consecutiveFailures,
+        simulation: scopedSim,
+        config,
+      });
+      const entry = { conv, verdict, convId: resolveConvId(conv, cid) };
+      if (!fallback) fallback = entry;
+      if (verdict.code === "DISCONNECTED_HANG") return entry;
+    }
+    return fallback;
+  }
+
+  function maybeDispatchHangAlert({ verdict, convId }, result) {
     if (verdict.code === "DISCONNECTED_HANG" && prevVerdictCode !== "DISCONNECTED_HANG") {
       const canNotify = config.notifyOnDisconnect && Date.now() - lastNotifiedAt > NOTIFY_COOLDOWN_MS;
       if (canNotify) {
@@ -205,10 +226,10 @@ export function createProbeCoordinator({
       alertLogger?.append({
         type: "DISCONNECTED_HANG",
         reason: verdict.messageKey || "UNKNOWN",
-        message: verdict.message,
+        message: verdict.headline || verdict.summary || "",
         simulated: verdict.simulated,
         notified: Boolean(canNotify),
-        convId: activeConv.id || null,
+        convId: convId || null,
         error: result.ok ? "" : result.error || "",
         lsRunning: runtime.ls?.running ?? null,
         healthz: runtime.ls?.healthz?.reachable ?? null,
@@ -254,11 +275,12 @@ export function createProbeCoordinator({
       envProxy: getEnvProxy(process.env, probeUrlSnapshot),
     });
     const simConvId = runtime.simulation?.active ? runtime.simulation.convId : null;
-    const activeConv = store.resolveActiveConversation(simConvId || getPreferredConvId());
+    const initialConvId =
+      simConvId || getPreferredConvId() || resolveConvId(store.resolveActiveConversation(null));
 
-    recordNetworkTransition(result, activeConv.id);
+    recordNetworkTransition(result, initialConvId);
     pushProbeSample(result);
-    maybeDispatchHangAlert(activeConv, result);
+    maybeDispatchHangAlert(pickAlertCandidate(simConvId), result);
     onStateChanged({ force: true });
     return result;
   }
@@ -314,22 +336,28 @@ export function createProbeCoordinator({
         ? null
         : runtime.lastKnownLsRoute);
 
+    lsSynStallStreak = (lsInfo.synSent443 || 0) > 0 ? lsSynStallStreak + 1 : 0;
+
+    if (lsInfo.healthz?.reachable === false) {
+      lsHealthFailures += 1;
+      if (lsAddress && lsHealthFailures >= 3) {
+        onHealthDead();
+      }
+    } else if (lsInfo.healthz?.reachable === true) {
+      lsHealthFailures = 0;
+    }
+
     runtime.ls = {
       ...lsInfo,
       route: resolvedRoute,
       endpoints: runtime.lsEndpoints,
+      synStallStreak: lsSynStallStreak,
+      healthz: {
+        reachable: lsInfo.healthz?.reachable ?? null,
+        instanceId: lsInfo.healthz?.instanceId ?? null,
+        consecutiveFailures: lsHealthFailures,
+      },
     };
-
-    if (lsAddress) {
-      if (lsInfo.healthz?.reachable === false) {
-        lsHealthFailures += 1;
-        if (lsHealthFailures >= 3) {
-          onHealthDead();
-        }
-      } else if (lsInfo.healthz?.reachable === true) {
-        lsHealthFailures = 0;
-      }
-    }
 
     onStateChanged();
   }
@@ -337,32 +365,31 @@ export function createProbeCoordinator({
   function resetProbeScheduler() {
     if (probeTimer) clearInterval(probeTimer);
     if (disableSchedulers) return;
-    probeTimer = setInterval(
-      () => {
-        runProbeOnce().catch(() => {});
-      },
-      Math.max(1000, Number(config.intervalMs) || 3000),
-    );
+    const intervalMs = Math.max(1000, Number(config.intervalMs) || 3000);
+    lastSchedulerTickAt = Date.now();
+    probeTimer = setInterval(() => {
+      const now = Date.now();
+      if (now - lastSchedulerTickAt > Math.max(30_000, intervalMs * 5)) {
+        runtime.consecutiveFailures = 0;
+        lsHealthFailures = 0;
+      }
+      lastSchedulerTickAt = now;
+      runProbeOnce().catch(() => {});
+    }, intervalMs);
   }
 
-  function startSchedulers({ getPinnedConvIds }) {
+  function startSchedulers({ getPinnedConvIds: pinnedFn } = {}) {
+    if (typeof pinnedFn === "function") activeGetPinnedConvIds = pinnedFn;
     if (disableSchedulers) return;
     store.loadFallbackHookIfNewer();
-    store.scanTranscript(getPinnedConvIds(), true);
-    runLsInspection()
-      .then(() => runProbeOnce())
-      .catch(() => {});
+    store.scanTranscript(activeGetPinnedConvIds(), true);
+    runLsInspection().then(() => runProbeOnce()).catch(() => {});
     resetProbeScheduler();
     timers.push(
       setInterval(() => {
-        const pinnedConvIds = getPinnedConvIds();
-        if (store.scanTranscript(pinnedConvIds, true)) {
-          onStateChanged({ force: true });
-        }
+        if (store.scanTranscript(activeGetPinnedConvIds(), true)) onStateChanged({ force: true });
       }, 1500),
-      setInterval(() => {
-        runLsInspection().catch(() => {});
-      }, 5000),
+      setInterval(() => { runLsInspection().catch(() => {}); }, 5000),
       setInterval(() => onStateChanged({ force: false }), 1000),
     );
   }

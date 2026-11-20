@@ -140,6 +140,7 @@ export async function createStatusServer({
     },
     onStateChanged: (opts) => sseHub.broadcastState(opts),
     getPreferredConvId: () => sseHub.getPreferredConvId(),
+    getPinnedConvIds: () => sseHub.getPinnedConvIds(),
   });
 
   function handleStatusOrEventsGet(req, res, url) {

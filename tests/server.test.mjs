@@ -515,6 +515,8 @@ describe("server HTTP 端到端集成测试", () => {
         probeFail = true;
         await httpRequest(port, "POST", "/api/probe", { headers: uiHeaders, body: {} });
         await httpRequest(port, "POST", "/api/probe", { headers: uiHeaders, body: {} });
+        assert.equal(notifications.length, 1);
+        await httpRequest(port, "POST", "/api/probe", { headers: uiHeaders, body: {} });
         assert.equal(notifications.length, 2);
       } finally {
         await app.stop();
@@ -872,13 +874,50 @@ describe("server HTTP 端到端集成测试", () => {
         assert.match(notifications[0].title, /Language Server/);
         assert.equal(notifications[0].title.includes("VPN"), false);
 
-        // 场景 2：LS 恢复后发生连续 2 次断网 -> 再恢复，验证 alerts.log 完整记录
+        // 场景 1b：LS 恢复存活后，单次 /healthz 失败防抖不误报 LS_DOWN，连续 2 次才报
         lsUp = true;
         await app.runLsInspection();
         await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        const aliveOnlyFailApp = await createStatusServer({
+          configPath: join(dir, "cfg-hz.json"),
+          serverInfoPath: join(dir, "srv-hz.json"),
+          brainDirs: [join(dir, "brain")],
+          fallbackHookPath: join(dir, "fb-hz.json"),
+          uiToken: "ui-hz",
+          hookToken: "hk-hz",
+          lsAddress: "",
+          sdkBridgeImpl: { config: { conversationId: "conv-hz" }, getPreloadJs: () => "", isSdkReady: () => false, handleSidecarRoute: async () => ({ status: 404, data: {} }) },
+          probePathsFn: async () => ({ proxyConfig: null, direct: { ok: true, statusCode: 404, latencyMs: 12, mode: "direct", error: null }, proxy: null }),
+          inspectLsFn: async () => ({ running: true, pids: ["99"], lsPid: "99", matchedByPort: true, established443: 1, synSent443: 0, proxyConns: 0, tunDetected: false, localIps: [], route: "direct", healthz: { reachable: false, instanceId: null } }),
+          notifyFn: () => { throw new Error("should not notify after 1 healthz failure"); },
+          disableSchedulers: true,
+          writeServerInfo: false,
+        });
+        const portHz = await aliveOnlyFailApp.listen(0, "127.0.0.1");
+        try {
+          aliveOnlyFailApp.store.applyHookEvent({ eventName: "PreInvocation", receivedAt: Date.now(), payload: { conversationId: "conv-hz" } });
+          await aliveOnlyFailApp.runLsInspection();
+          const st1 = JSON.parse((await httpRequest(portHz, "GET", "/api/status?conversationId=conv-hz", { headers: { "X-Sidecar-Token": "ui-hz" } })).body);
+          assert.equal(st1.verdict.code, "WAITING_LLM");
+          await aliveOnlyFailApp.runLsInspection();
+          const st2 = JSON.parse((await httpRequest(portHz, "GET", "/api/status?conversationId=conv-hz", { headers: { "X-Sidecar-Token": "ui-hz" } })).body);
+          assert.equal(st2.verdict.code, "DISCONNECTED_HANG");
+          assert.equal(st2.verdict.messageKey, "LS_DOWN");
+        } finally {
+          await aliveOnlyFailApp.stop();
+        }
+
+        // 场景 2：纯 TIMEOUT 连续 2 次先进入 NET_SUSPECT 复测，第 3 次确认 DISCONNECTED_HANG（60s 冷却期内不重复弹窗）并带 convId/message 落盘 alerts.log
         netUp = false;
         await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
         await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        const afterTwoTimeouts = readFileSync(alertsLogPath, "utf8")
+          .trim()
+          .split(/\r?\n/)
+          .map((line) => JSON.parse(line));
+        assert.equal(afterTwoTimeouts.some((e) => e.reason === "NET_DOWN_HANG"), false);
+        await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
+        assert.equal(notifications.length, 1);
         netUp = true;
         await httpRequest(port, "POST", "/api/probe", { headers: postHeaders, body: {} });
 
@@ -887,10 +926,50 @@ describe("server HTTP 端到端集成测试", () => {
           .trim()
           .split(/\r?\n/)
           .map((line) => JSON.parse(line));
-        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.reason === "LS_DOWN" && e.notified === true));
-        assert.ok(entries.some((e) => e.type === "NET_FAILED" && e.error === "TIMEOUT"));
-        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.reason === "NET_DOWN_HANG"));
-        assert.ok(entries.some((e) => e.type === "NET_RECOVERED" && e.latencyMs === 18));
+        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.reason === "LS_DOWN" && e.notified === true && e.convId === "conv-alerts" && Boolean(e.message)));
+        assert.ok(entries.some((e) => e.type === "NET_FAILED" && e.error === "TIMEOUT" && e.convId === "conv-alerts"));
+        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.reason === "NET_DOWN_HANG" && e.convId === "conv-alerts" && Boolean(e.message)));
+        assert.ok(entries.some((e) => e.type === "NET_RECOVERED" && e.latencyMs === 18 && e.convId === "conv-alerts"));
+      } finally {
+        await app.stop();
+      }
+    });
+  });
+
+  it("多钉选会话下后台对话挂起仍触发通知并在 alerts.log 记录对应后台 convId", async () => {
+    await withTempDir(async (dir) => {
+      const notifications = [];
+      const rtDir = join(dir, ".runtime");
+      const alertsLogPath = join(rtDir, "alerts.log");
+      const app = await createStatusServer({
+        configPath: join(rtDir, "config.json"),
+        serverInfoPath: join(rtDir, "server.json"),
+        brainDirs: [join(dir, "brain")],
+        fallbackHookPath: join(rtDir, "hook-state.json"),
+        uiToken: "ui-pin",
+        hookToken: "hk-pin",
+        lsAddress: "",
+        sdkBridgeImpl: { config: { conversationId: "conv-front-idle" }, getPreloadJs: () => "", isSdkReady: () => false, handleSidecarRoute: async () => ({ status: 404, data: {} }) },
+        probePathsFn: async () => ({ proxyConfig: null, direct: { ok: false, statusCode: null, latencyMs: 100, mode: "direct", error: "ENOTFOUND" }, proxy: null }),
+        inspectLsFn: async () => ({ running: true, pids: ["10"], lsPid: "10", matchedByPort: true, established443: 1, synSent443: 0, proxyConns: 0, tunDetected: false, localIps: [], route: "direct", healthz: { reachable: true, instanceId: "p" } }),
+        notifyFn: (title, message) => notifications.push({ title, message }),
+        disableSchedulers: true,
+        writeServerInfo: false,
+      });
+      await app.listen(0, "127.0.0.1");
+      try {
+        await app.runLsInspection();
+        app.store.applyHookEvent({ eventName: "Stop", receivedAt: Date.now() - 1000, payload: { conversationId: "conv-front-idle", terminationReason: "DONE" } });
+        app.store.applyHookEvent({ eventName: "PreInvocation", receivedAt: Date.now(), payload: { conversationId: "conv-bg-busy", invocationNum: 1 } });
+        // 触发对 conv-bg-busy 的状态查询，使 sseHub 记录到它
+        await app.runProbeOnce();
+        // 先调用 GET /api/status?conversationId=conv-bg-busy 模拟后台标签或近期窗口
+        const port = app.server.address().port;
+        await httpRequest(port, "GET", "/api/status?conversationId=conv-bg-busy", { headers: { "X-Sidecar-Token": "ui-pin" } });
+        await app.runProbeOnce();
+        assert.equal(notifications.length, 1);
+        const entries = readFileSync(alertsLogPath, "utf8").trim().split(/\r?\n/).map((l) => JSON.parse(l));
+        assert.ok(entries.some((e) => e.type === "DISCONNECTED_HANG" && e.convId === "conv-bg-busy"));
       } finally {
         await app.stop();
       }

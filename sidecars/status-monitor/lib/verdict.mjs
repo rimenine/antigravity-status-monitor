@@ -7,9 +7,13 @@ export function selectEffectiveProbe({ dual, ls, lastKnownLsRoute, envProxy }) {
   let activeRoute = "direct";
   let primary = dual.direct;
 
+  const preferMixedProxy = (ls?.proxyConns || 0) > 0 && !dual.direct?.ok && Boolean(dual.proxy?.ok);
   if (envProxy || dual.proxyConfig?.source === "manual" || (lsRoute === "proxy" && hasUsableProxy)) {
     activeRoute = "proxy";
     primary = dual.proxy || dual.direct;
+  } else if ((lsRoute === "tun" || ls?.tunDetected || lsRoute === "direct") && preferMixedProxy) {
+    activeRoute = "proxy";
+    primary = dual.proxy;
   } else if (lsRoute === "tun" || ls?.tunDetected) {
     activeRoute = "tun";
     primary = dual.direct;
@@ -41,6 +45,15 @@ export function selectEffectiveProbe({ dual, ls, lastKnownLsRoute, envProxy }) {
   };
 }
 
+function isTimeoutOnlyPair(probes, consecutiveFailures) {
+  if (consecutiveFailures !== 2 || !Array.isArray(probes) || probes.length < 2) {
+    return false;
+  }
+  return probes
+    .slice(-2)
+    .every((p) => p && !p.ok && /超时|timeout/i.test(String(p.error || "")));
+}
+
 export function computeVerdict({
   hook,
   transcript,
@@ -53,7 +66,10 @@ export function computeVerdict({
 }) {
   const hookAgeMs = hook?.lastEventAt ? now - hook.lastEventAt : Infinity;
   const transcriptAgeMs = transcript?.latestStepAt ? now - transcript.latestStepAt : Infinity;
-  const hookIsStop = hook?.lastEvent === "Stop" && hook?.phase === "idle" && Number.isFinite(hook?.lastEventAt);
+  const hookIsStop =
+    hook?.lastEvent === "Stop" &&
+    (hook?.phase === "idle" || hook?.phase === "background_task") &&
+    Number.isFinite(hook?.lastEventAt);
   const transcriptAdvancedPastStop =
     !hookIsStop ||
     !transcript?.latestStepAt ||
@@ -80,7 +96,7 @@ export function computeVerdict({
       keepActiveHookOverUnknownTranscript)
   ) {
     const timedOutWithIdleTranscript =
-      hook.phase !== "idle" && hookAgeMs > 5 * 60 * 1000 && transcript?.inferredPhase === "idle";
+      hook.phase === "waiting_llm" && hookAgeMs > 5 * 60 * 1000 && transcript?.inferredPhase === "idle";
     phase = hookAgeMs < 15 * 60 * 1000 && !timedOutWithIdleTranscript ? hook.phase : "idle";
     source = "hook";
   } else if (transcript?.latestStepAt) {
@@ -105,10 +121,19 @@ export function computeVerdict({
 
   const latestProbe = probes[probes.length - 1] || null;
   const simulatedDown = Boolean(simulation?.active);
-  const networkDown = simulatedDown || consecutiveFailures >= 2;
-  const networkSuspect = !networkDown && consecutiveFailures === 1;
-  const lsDown = ls?.running === false || ls?.healthz?.reachable === false;
-  const lsSynStall = (ls?.synSent443 || 0) > 0;
+  const timeoutOnlyDebounced = !simulatedDown && isTimeoutOnlyPair(probes, consecutiveFailures);
+  const networkDown = simulatedDown || (consecutiveFailures >= 2 && !timeoutOnlyDebounced);
+  const networkSuspect = !networkDown && (consecutiveFailures === 1 || timeoutOnlyDebounced);
+
+  const healthzFails = ls?.healthz?.consecutiveFailures;
+  const lsHealthConfirmedDown =
+    ls?.healthz?.reachable === false && (healthzFails == null || healthzFails >= 2);
+  const lsDown = ls?.running === false || lsHealthConfirmedDown;
+
+  const synStreak = ls?.synStallStreak;
+  const lsSynStall =
+    (ls?.synSent443 || 0) > 0 &&
+    ((ls?.established443 || 0) === 0 || synStreak == null || synStreak >= 2);
 
   const latestError = transcript?.latestStepType === "ERROR_MESSAGE" ? transcript.latestError : null;
   const apiErrorIsCurrent = Boolean(
@@ -185,6 +210,11 @@ export function computeVerdict({
     severity = "tool";
     messageKey = "RUNNING_TOOL";
     messageParams = { toolLabel };
+  } else if (phase === "background_task") {
+    code = "BACKGROUND_TASK";
+    severity = "tool";
+    messageKey = "BACKGROUND_TASK";
+    messageParams = { elapsedSec };
   } else {
     if (networkDown) {
       code = "OFFLINE_IDLE";

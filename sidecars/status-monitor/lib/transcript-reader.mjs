@@ -1,34 +1,27 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
+import {
+  ABORTED_PLANNER_STATUSES,
+  hasPendingBackgroundTask,
+  hasPendingParallelTools,
+  inferTranscriptPhase,
+  parseTranscriptError,
+  TERMINAL_PLANNER_STATUSES,
+  WAITING_LLM_STEP_TYPES,
+} from "./transcript-phase.mjs";
+
+export {
+  ABORTED_PLANNER_STATUSES,
+  hasPendingBackgroundTask,
+  hasPendingParallelTools,
+  inferTranscriptPhase,
+  parseTranscriptError,
+  TERMINAL_PLANNER_STATUSES,
+  WAITING_LLM_STEP_TYPES,
+};
 
 const TRANSCRIPT_STALE_MS = 10 * 60 * 1000;
-const CLOCK_SKEW_WINDOW_MS = 6 * 60 * 60 * 1000;
-
-export const TERMINAL_PLANNER_STATUSES = new Set([
-  "DONE",
-  "ERROR",
-  "CANCELLED",
-  "CANCELED",
-  "FAILED",
-  "ABORTED",
-  "STOPPED",
-]);
-
-export const WAITING_LLM_STEP_TYPES = new Set([
-  "USER_INPUT",
-  "GENERIC",
-  "CODE_ACTION",
-  "RUN_COMMAND",
-  "VIEW_FILE",
-  "SEARCH_WEB",
-  "LIST_DIRECTORY",
-  "GREP_SEARCH",
-  "READ_URL_CONTENT",
-  "SYSTEM_MESSAGE",
-  "EPHEMERAL_MESSAGE",
-  "CHECKPOINT",
-  "CONVERSATION_HISTORY",
-  "ERROR_MESSAGE",
-]);
+const ERROR_STALE_MS = 3 * 60 * 1000;
+const CLOCK_SKEW_WINDOW_MS = 2 * 60 * 1000;
 
 /** 构建空 Hook 状态结构。 */
 export function createEmptyHook(conversationId = null) {
@@ -43,6 +36,7 @@ export function createEmptyHook(conversationId = null) {
     stepIdx: null,
     terminationReason: null,
     error: null,
+    fullyIdle: null,
     transcriptPath: null,
   };
 }
@@ -169,95 +163,6 @@ export function readTailLines(filePath, stat, initialBytes = 32768, maxBytes = 1
   }
 }
 
-/** 解析 Transcript 中 ERROR_MESSAGE 记录的错误分类、重试次数与脱敏原因。 */
-export function parseTranscriptError(record) {
-  if (!record || record.type !== "ERROR_MESSAGE") return null;
-  const rawFull = String(record.error || record.content || "").trim();
-  if (!rawFull) {
-    return {
-      kind: "unknown",
-      attempt: null,
-      shortReason: "API error",
-      raw: "",
-    };
-  }
-
-  const attemptMatch = rawFull.match(/\battempt\s+(\d+)\b/i);
-  const attempt = attemptMatch ? Number(attemptMatch[1]) : null;
-  const lower = rawFull.toLowerCase();
-
-  let kind = "api_error";
-  let shortReason = "";
-  if (
-    lower.includes("wsasend") ||
-    lower.includes("forcibly closed") ||
-    lower.includes("connection reset") ||
-    lower.includes("broken pipe") ||
-    lower.includes("econnreset")
-  ) {
-    kind = "upload_reset";
-    shortReason = lower.includes("wsasend")
-      ? "wsasend: connection forcibly closed"
-      : "connection reset by peer";
-  } else if (
-    lower.includes("stream idle timeout") ||
-    lower.includes("context deadline exceeded") ||
-    lower.includes("timed out")
-  ) {
-    kind = "stream_timeout";
-    const tm = rawFull.match(/stream idle timeout\s*\(([^)]+)\)/i);
-    shortReason = tm ? `stream idle timeout (${tm[1]})` : "upstream request timeout";
-  } else if (lower.includes("stream was interrupted")) {
-    kind = "stream_interrupted";
-    shortReason = "stream interrupted";
-  } else if (lower.includes(": eof") || /\beof\b/i.test(rawFull)) {
-    kind = "upstream_eof";
-    shortReason = "upstream EOF";
-  } else if (
-    lower.includes("model unreachable") ||
-    lower.includes("dial tcp") ||
-    lower.includes("no such host") ||
-    lower.includes("connection refused")
-  ) {
-    kind = "network_error";
-    shortReason = "model API unreachable";
-  } else if (lower.includes("parsing the tool call")) {
-    kind = "tool_parse";
-    shortReason = "tool call parse error";
-  } else {
-    const cleaned = rawFull
-      .replace(/Post\s+"https?:\/\/[^"]+":?\s*/gi, "")
-      .replace(/\s+/g, " ")
-      .trim();
-    shortReason = (cleaned || "API error").slice(0, 96);
-  }
-
-  return {
-    kind,
-    attempt,
-    shortReason,
-    raw: rawFull.slice(0, 240),
-  };
-}
-
-/** 根据最后一条记录与文件新鲜度推断当前所处阶段。 */
-export function inferTranscriptPhase(last, isFresh) {
-  if (!isFresh || !last) return "idle";
-  if (WAITING_LLM_STEP_TYPES.has(last.type)) {
-    return "waiting_llm";
-  }
-  if (last.type === "PLANNER_RESPONSE") {
-    if (last.tool_calls && last.tool_calls.length > 0) {
-      return "running_tool";
-    }
-    if (TERMINAL_PLANNER_STATUSES.has(String(last.status || "").toUpperCase())) {
-      return "idle";
-    }
-    return "waiting_llm";
-  }
-  return "idle";
-}
-
 /** 读取并解析单个 Transcript 文件的最新步骤与推断阶段。 */
 export function parseTranscriptSnapshot(filePath, convId, prevTranscript = null, now = Date.now()) {
   let stat;
@@ -273,9 +178,9 @@ export function parseTranscriptSnapshot(filePath, convId, prevTranscript = null,
     prevTranscript.mtimeMs === stat.mtimeMs &&
     prevTranscript.size === stat.size
   ) {
-    const idleExpired =
-      prevTranscript.inferredPhase !== "idle" &&
-      now - Math.max(prevTranscript.latestStepAt || 0, prevTranscript.mtimeMs || 0) >= TRANSCRIPT_STALE_MS;
+    const staleMs = prevTranscript.latestStepType === "ERROR_MESSAGE" ? ERROR_STALE_MS : TRANSCRIPT_STALE_MS;
+    const refActivityAt = prevTranscript.latestStepAt ?? prevTranscript.mtimeMs ?? 0;
+    const idleExpired = prevTranscript.inferredPhase !== "idle" && now - refActivityAt >= staleMs;
     return { status: idleExpired ? "stale-idle" : "unchanged" };
   }
 
@@ -304,9 +209,11 @@ export function parseTranscriptSnapshot(filePath, convId, prevTranscript = null,
         : parsedStepAt;
   }
 
-  const isFresh = now - Math.max(latestStepAt || 0, mtimeMs) < TRANSCRIPT_STALE_MS;
-  const inferredPhase = inferTranscriptPhase(last, isFresh);
-  const latestError = parseTranscriptError(last);
+  const staleMs = last.type === "ERROR_MESSAGE" ? ERROR_STALE_MS : TRANSCRIPT_STALE_MS;
+  const effectiveActivityAt = Number.isFinite(latestStepAt) ? latestStepAt : mtimeMs;
+  const isFresh = now - effectiveActivityAt < staleMs;
+  const inferredPhase = inferTranscriptPhase(last, isFresh, parsed);
+  const latestError = isFresh ? parseTranscriptError(last) : null;
   const lastToolName = lastPlanner?.tool_calls?.length
     ? lastPlanner.tool_calls.map((t) => t.name).join(", ")
     : null;

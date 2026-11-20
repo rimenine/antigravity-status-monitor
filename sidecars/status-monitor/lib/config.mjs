@@ -88,7 +88,8 @@ export function detectDefaultLang({ env = process.env, intlLocale = "" } = {}) {
 
 export const DEFAULT_CONFIG = {
   intervalMs: 3000,
-  timeoutMs: 2500,
+  timeoutMs: 4000,
+  timeoutMigratedV3: true,
   stallThresholdSec: 25,
   probeUrl: DEFAULT_PROBE_URL,
   probeUrlMigratedV2: true,
@@ -164,6 +165,7 @@ export function loadConfig(configPath = CONFIG_PATH) {
         ...DEFAULT_CONFIG,
         intervalMs,
         timeoutMs,
+        timeoutMigratedV3: Boolean(saved.timeoutMigratedV3),
         stallThresholdSec,
         probeUrl: probeCheck.ok ? probeCheck.value : DEFAULT_PROBE_URL,
         probeUrlMigratedV2: Boolean(saved.probeUrlMigratedV2),
@@ -186,6 +188,11 @@ export function loadConfig(configPath = CONFIG_PATH) {
       ) {
         merged.probeUrl = DEFAULT_PROBE_URL;
         merged.probeUrlMigratedV2 = true;
+        dirty = true;
+      }
+      if (!saved.timeoutMigratedV3 && (saved.timeoutMs === undefined || saved.timeoutMs === 2500)) {
+        merged.timeoutMs = DEFAULT_CONFIG.timeoutMs;
+        merged.timeoutMigratedV3 = true;
         dirty = true;
       }
       if (dirty) {
@@ -242,8 +249,12 @@ export function applyConfigPatch(config, patch, { configPath = CONFIG_PATH, stri
   if (patch.timeoutMs !== undefined) {
     if (patch.timeoutMs !== null) {
       const n = clampFiniteNumber(patch.timeoutMs, 800, 10000);
-      if (n !== null) next.timeoutMs = n;
-      else if (strict) throw createConfigError("INVALID_TIMEOUT", "超时时间必须是有效数字");
+      if (n !== null) {
+        next.timeoutMs = n;
+        next.timeoutMigratedV3 = true;
+      } else if (strict) {
+        throw createConfigError("INVALID_TIMEOUT", "超时时间必须是有效数字");
+      }
     } else if (strict) {
       throw createConfigError("INVALID_TIMEOUT", "超时时间不能为空");
     }
