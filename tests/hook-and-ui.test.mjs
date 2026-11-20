@@ -490,8 +490,10 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
 
   it("app.js 真实对接 server.mjs 完成首屏拉取、预览告警切换、错误条保活、对话跟随与隐藏停轮询", async () => {
     await withTempDir(async (dir) => {
+      const cfgPath = join(dir, "config.json");
+      writeFileSync(cfgPath, JSON.stringify({ lang: "zh" }), "utf8");
       const app = await createStatusServer({
-        configPath: join(dir, "config.json"),
+        configPath: cfgPath,
         serverInfoPath: join(dir, "server.json"),
         brainDirs: [join(dir, "brain")],
         fallbackHookPath: join(dir, "hook-state.json"),

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { createStateStore } from "../sidecars/status-monitor/lib/state-store.mjs";
@@ -634,7 +634,7 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       const oldTime = new Date(Date.now() - 12 * 60 * 1000);
       utimesSync(transcriptPath, oldTime, oldTime);
       store.resolveActiveConversation(convErr).transcript.latestStepAt = oldTime.getTime();
-      store.resolveActiveConversation(convErr).transcript.mtimeMs = oldTime.getTime();
+      store.resolveActiveConversation(convErr).transcript.mtimeMs = statSync(transcriptPath).mtimeMs;
       assert.equal(store.scanTranscript(convErr, false), true);
       assert.equal(store.resolveActiveConversation(convErr).transcript.inferredPhase, "idle");
       assert.equal(store.resolveActiveConversation(convErr).transcript.latestError, null);
