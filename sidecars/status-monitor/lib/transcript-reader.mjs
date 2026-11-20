@@ -13,6 +13,23 @@ export const TERMINAL_PLANNER_STATUSES = new Set([
   "STOPPED",
 ]);
 
+export const WAITING_LLM_STEP_TYPES = new Set([
+  "USER_INPUT",
+  "GENERIC",
+  "CODE_ACTION",
+  "RUN_COMMAND",
+  "VIEW_FILE",
+  "SEARCH_WEB",
+  "LIST_DIRECTORY",
+  "GREP_SEARCH",
+  "READ_URL_CONTENT",
+  "SYSTEM_MESSAGE",
+  "EPHEMERAL_MESSAGE",
+  "CHECKPOINT",
+  "CONVERSATION_HISTORY",
+  "ERROR_MESSAGE",
+]);
+
 /** 构建空 Hook 状态结构。 */
 export function createEmptyHook(conversationId = null) {
   return {
@@ -44,6 +61,7 @@ export function createEmptyTranscript(conversationId = null) {
     latestRecordCreatedAt: null,
     hasUserExplicit: false,
     lastToolName: null,
+    latestError: null,
     tokens: null,
     inferredPhase: "idle",
   };
@@ -151,10 +169,81 @@ export function readTailLines(filePath, stat, initialBytes = 32768, maxBytes = 1
   }
 }
 
+/** 解析 Transcript 中 ERROR_MESSAGE 记录的错误分类、重试次数与脱敏原因。 */
+export function parseTranscriptError(record) {
+  if (!record || record.type !== "ERROR_MESSAGE") return null;
+  const rawFull = String(record.error || record.content || "").trim();
+  if (!rawFull) {
+    return {
+      kind: "unknown",
+      attempt: null,
+      shortReason: "API error",
+      raw: "",
+    };
+  }
+
+  const attemptMatch = rawFull.match(/\battempt\s+(\d+)\b/i);
+  const attempt = attemptMatch ? Number(attemptMatch[1]) : null;
+  const lower = rawFull.toLowerCase();
+
+  let kind = "api_error";
+  let shortReason = "";
+  if (
+    lower.includes("wsasend") ||
+    lower.includes("forcibly closed") ||
+    lower.includes("connection reset") ||
+    lower.includes("broken pipe") ||
+    lower.includes("econnreset")
+  ) {
+    kind = "upload_reset";
+    shortReason = lower.includes("wsasend")
+      ? "wsasend: connection forcibly closed"
+      : "connection reset by peer";
+  } else if (
+    lower.includes("stream idle timeout") ||
+    lower.includes("context deadline exceeded") ||
+    lower.includes("timed out")
+  ) {
+    kind = "stream_timeout";
+    const tm = rawFull.match(/stream idle timeout\s*\(([^)]+)\)/i);
+    shortReason = tm ? `stream idle timeout (${tm[1]})` : "upstream request timeout";
+  } else if (lower.includes("stream was interrupted")) {
+    kind = "stream_interrupted";
+    shortReason = "stream interrupted";
+  } else if (lower.includes(": eof") || /\beof\b/i.test(rawFull)) {
+    kind = "upstream_eof";
+    shortReason = "upstream EOF";
+  } else if (
+    lower.includes("model unreachable") ||
+    lower.includes("dial tcp") ||
+    lower.includes("no such host") ||
+    lower.includes("connection refused")
+  ) {
+    kind = "network_error";
+    shortReason = "model API unreachable";
+  } else if (lower.includes("parsing the tool call")) {
+    kind = "tool_parse";
+    shortReason = "tool call parse error";
+  } else {
+    const cleaned = rawFull
+      .replace(/Post\s+"https?:\/\/[^"]+":?\s*/gi, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    shortReason = (cleaned || "API error").slice(0, 96);
+  }
+
+  return {
+    kind,
+    attempt,
+    shortReason,
+    raw: rawFull.slice(0, 240),
+  };
+}
+
 /** 根据最后一条记录与文件新鲜度推断当前所处阶段。 */
 export function inferTranscriptPhase(last, isFresh) {
   if (!isFresh || !last) return "idle";
-  if (last.type === "USER_INPUT" || last.type === "GENERIC" || last.type === "CODE_ACTION") {
+  if (WAITING_LLM_STEP_TYPES.has(last.type)) {
     return "waiting_llm";
   }
   if (last.type === "PLANNER_RESPONSE") {
@@ -217,6 +306,7 @@ export function parseTranscriptSnapshot(filePath, convId, prevTranscript = null,
 
   const isFresh = now - Math.max(latestStepAt || 0, mtimeMs) < TRANSCRIPT_STALE_MS;
   const inferredPhase = inferTranscriptPhase(last, isFresh);
+  const latestError = parseTranscriptError(last);
   const lastToolName = lastPlanner?.tool_calls?.length
     ? lastPlanner.tool_calls.map((t) => t.name).join(", ")
     : null;
@@ -238,6 +328,7 @@ export function parseTranscriptSnapshot(filePath, convId, prevTranscript = null,
       latestRecordCreatedAt,
       hasUserExplicit,
       lastToolName,
+      latestError,
       tokens: lastPlanner
         ? {
             input: lastPlanner.input_tokens ?? null,

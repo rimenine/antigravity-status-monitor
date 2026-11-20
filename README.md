@@ -20,9 +20,10 @@
 
 单看主界面的加载动画很难判断卡在哪一步，插件把四路直接信号拼在一起判断：
 
-1. **Lifecycle Hooks + Transcript 日志联动计时**
+1. **Lifecycle Hooks + Transcript 日志联动计时与 API 重试识别**
    - [hooks.json](hooks.json) 只挂载 `PreInvocation` 与 `Stop` 两个关键事件（默认优先调用内置 `agy-node`，没装全局 Node 也能跑）；
-   - 只要 `transcript.jsonl` 有新输出，或者有新 Hook 进来，等待计时就会立刻归零——不会把正常的多工具长任务误判成卡死。
+   - 只要 `transcript.jsonl` 有新输出，或者有新 Hook 进来，等待计时就会立刻归零——不会把正常的多工具长任务误判成卡死；
+   - 同时实时解析 `transcript.jsonl` 中的 `ERROR_MESSAGE`（如 `wsasend` 上传连接重置、`EOF`、`stream idle timeout`、`model unreachable`）及常见中间步骤：一旦遇到大上下文上传断连或上游流报错进入后台重试，即使轻探针仍绿灯，面板也会立即标出 `RETRY · 接口报错` 并同步到本对话事件流，给出 `/compact` 压缩上下文或切换代理节点建议，不再误报为空闲。
 2. **双链路 HTTPS 短连接探针（直连/TUN vs 代理）**
    - 按设定周期分别走直连和代理测一次短连接可达性（默认探测 `https://daily-cloudcode-pa.googleapis.com`），支持自动读取环境变量/系统代理，也可以在设置里手动填写 HTTP `Basic` 或无认证 SOCKS5 代理，再结合宿主 `Language Server` 的 443 端口连接状态一起判断链路是否正常。
    - **自适应短连接轮询 + 严格本对话隔离**：面板前台每 1 秒通过 `/api/status` 拉取状态（`~2ms` 用完即释放连接，切到后台自动暂停并释放连接槽位，彻底避免多个 Sidecar 标签长期占满 Chromium 6 条 HTTP/1.1 连接上限导致新面板转圈或按钮无响应）。前端无任何对话切换选项，服务端也彻底移除 `auto` 切换与跨目录抢占逻辑，每个对话均使用物理分桶的实时事件流，仅展示本对话的 Hooks、工具步骤、演练预警与网络变更，随宿主切换对话时同步切换；服务端仍保留 `/api/events` SSE 接口供外部按需订阅。
@@ -40,7 +41,7 @@
 
 这只是一个轻量的 Sidecar 状态面板，并非内核级抓包工具，以下边界需要注意：
 
-* **新建短探针能通 ≠ 旧的长连接还活着**：网络探针是周期性新建 HTTPS GET 短连接测试域名 / TLS / HTTP 是否通畅（`2xx/3xx` 及 `400/404/405/410` 视为上游有响应，因为 `daily-cloudcode-pa.googleapis.com` 根路径默认返回 `404`；`401/403/407/408/429/451` 与 `5xx` 均判定为阻塞或失败）。如果只是代理节点波动导致**原本那条流式长连接半开假死**，而新建探针刚好切换到了可用节点，面板会倾向显示“网络正常 / 疑似模型卡顿”。
+* **新建短探针能通 ≠ 旧的长连接还活着**：网络探针是周期性新建 HTTPS GET 短连接测试域名 / TLS / HTTP 是否通畅（`2xx/3xx` 及 `400/404/405/410` 视为上游有响应，因为 `daily-cloudcode-pa.googleapis.com` 根路径默认返回 `404`；`401/403/407/408/429/451` 与 `5xx` 均判定为阻塞或失败）。如果只是代理节点波动导致**原本那条流式长连接或大包上传（`wsasend`）被远端重置**，在 Antigravity 写入 `ERROR_MESSAGE` 重试日志后，面板会立即标出 `RETRY · 接口报错`；若请求仍完全静默阻塞且尚未落盘报错、而新建探针刚好成功，则会倾向显示“网络正常 / 疑似模型卡顿”。
 * **代理与 TUN 识别覆盖范围**：支持环境变量（`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`）、Windows 注册表 `HKCU`/`HKLM`（含 `ProxyOverride` 绕过列表与 `DefaultConnectionSettings` 开关校验）、macOS `scutil`（含 `ExceptionsList`）、Linux GNOME `gsettings`（含 `ignore-hosts`）中的 **HTTP 代理**（含基础 `Basic` 鉴权）与**无认证 SOCKS5 代理**，并支持设置面板里的**「手动代理」**兜底（适合 PAC、非 GNOME 桌面、纯 SOCKS5 等场景）；**暂不支持解析 PAC 脚本（会给提示）、`https://`/`socks4://` 代理、带密码的 SOCKS5、企业 NTLM 域认证或按进程注入式透明分流工具；公司网关若使用了未导入 Node 信任链的中间人自签根证书，也可能报 TLS 失败**。TUN 网卡基于 `198.18.0.0/15`（Fake-IP）与 `100.64.0.0/10`（CGNAT / Tailscale / WireGuard 等常见段）做启发式归类。
 * **Hooks 与常驻开销**：Antigravity 每次 `PreInvocation` / `Stop` 时会拉起一次短暂的轻量 Hook 进程；Sidecar 本身为常驻本地 Node 进程。
 * **本地接口访问范围**：即使仅绑定 `127.0.0.1`，全部 `GET /api/*`（含 `/api/status`、`/api/events`）与 `POST /api/*` 均默认强制校验 `X-Sidecar-Token`（或 SSE 使用的 `?token=`）、`Host` 回环白名单、`Sec-Fetch-Site` 与 `Origin`；未授权网页或未携带 Token 的本机请求会被直接拦截（`401`/`403`）。

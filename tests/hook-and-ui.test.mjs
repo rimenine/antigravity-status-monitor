@@ -9,7 +9,7 @@ import { createContext, runInContext } from "node:vm";
 import { packageRelease } from "../scripts/package-release.mjs";
 import { createSdkBridge } from "../sidecars/status-monitor/lib/sdk-bridge.mjs";
 import { createStatusServer } from "../sidecars/status-monitor/server.mjs";
-import { PLUGIN_ROOT, withTempDir } from "./helpers.mjs";
+import { PLUGIN_ROOT, withTempDir, writeJsonl } from "./helpers.mjs";
 
 function runHookReporter({ pluginRoot, eventName, stdinPayload, env = {} }) {
   return new Promise((resolve, reject) => {
@@ -528,6 +528,21 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         receivedAt: now,
         payload: { conversationId: "conv-busy", invocationNum: 5 },
       });
+      app.store.applyHookEvent({
+        eventName: "PreInvocation",
+        receivedAt: now - 57_000,
+        payload: { conversationId: "conv-err-ui", invocationNum: 1 },
+      });
+      writeJsonl(join(dir, "brain", "conv-err-ui", ".system_generated/logs/transcript.jsonl"), [
+        {
+          step_index: 212,
+          type: "ERROR_MESSAGE",
+          status: "DONE",
+          error:
+            'API error (attempt 1): request failed: Post "https://example.invalid/v1": write tcp 192.0.2.1:50001->192.0.2.2:443: wsasend: An existing connection was forcibly closed by the remote host.',
+          created_at: new Date(now - 5_000).toISOString(),
+        },
+      ]);
 
       const publicDir = join(PLUGIN_ROOT, "sidecars/status-monitor/public");
       const html = readFileSync(join(publicDir, "index.html"), "utf8");
@@ -743,6 +758,13 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         assert.match(elements.get("agentLogAge").textContent, /PreInvocation · \d+s/);
         assert.doesNotMatch(elements.get("agentLogAge").textContent, /前写入/);
         assert.equal(fetchCalls.some((u) => String(u).includes("conversationId=auto")), false);
+
+        // 4b. 切换到写入了 ERROR_MESSAGE 的 conv-err-ui 时，前端正确渲染 RETRY · 接口报错与 API 报错 #1 写入秒数
+        winObj.sidecar.conversationId = "conv-err-ui";
+        winObj.emit("focus");
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("RETRY"));
+        assert.match(elements.get("verdictBadge").textContent, /RETRY · 接口报错/);
+        assert.match(elements.get("agentLogAge").textContent, /API 报错 #1 · \d+s 前写入/);
 
         // 5. 切到隐藏页签后停止轮询请求，防止后台窗口耗尽 HTTP/1.1 6 连接池
         docObj.visibilityState = "hidden";

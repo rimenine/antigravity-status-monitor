@@ -553,4 +553,115 @@ describe("createStateStore（多会话状态隔离与 Transcript 解析）", () 
       assert.equal(snapB.events.some((e) => e.conversationId === "conv-a"), false);
     });
   });
+
+  it("解析 ERROR_MESSAGE 重试记录：同 step_index 不同时间戳独立记录事件流、严格会话隔离、stale-idle 与新响应后自动清理", async () => {
+    await withTempDir(async (dir) => {
+      const brainDir = join(dir, "brain");
+      const convErr = "conv-err-retry";
+      const convOther = "conv-other-clean";
+      const transcriptPath = join(brainDir, convErr, ".system_generated/logs/transcript.jsonl");
+      const t1 = new Date(Date.now() - 3000);
+      const t2 = new Date(Date.now() - 1000);
+
+      writeJsonl(transcriptPath, [
+        { step_index: 211, type: "USER_INPUT", content: "question", created_at: new Date(Date.now() - 5000).toISOString() },
+        {
+          step_index: 212,
+          type: "ERROR_MESSAGE",
+          status: "DONE",
+          error:
+            'API error (attempt 1): request failed: Post "https://example.invalid/v1": write tcp 192.0.2.1:50001->192.0.2.2:443: wsasend: An existing connection was forcibly closed by the remote host.',
+          created_at: t1.toISOString(),
+        },
+      ]);
+
+      const store = createStateStore({
+        brainDirs: [brainDir],
+        fallbackHookPath: join(dir, "hook-state.json"),
+      });
+
+      assert.equal(store.scanTranscript(convErr, true), true);
+      const snap1 = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 120 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "zh" },
+        requestedConvId: convErr,
+      });
+      assert.equal(snap1.transcript.inferredPhase, "waiting_llm");
+      assert.equal(snap1.transcript.latestError?.kind, "upload_reset");
+      assert.equal(snap1.verdict.code, "API_RETRY");
+      assert.equal(snap1.events.filter((e) => e.i18n?.key === "API_ERROR_STEP").length, 1);
+
+      // 相同 step_index=212 但不同 created_at（如用户重发后再次失败）必须再次写入事件流，且不污染 convOther
+      appendFileSync(
+        transcriptPath,
+        JSON.stringify({
+          step_index: 212,
+          type: "ERROR_MESSAGE",
+          status: "DONE",
+          error: 'API error (attempt 3): Post "https://example.invalid/v1": EOF',
+          created_at: t2.toISOString(),
+        }) + "\n",
+        "utf8",
+      );
+      assert.equal(store.scanTranscript(convErr, true), true);
+      const snap2 = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 120 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "en" },
+        requestedConvId: convErr,
+      });
+      const errEvents2 = snap2.events.filter((e) => e.i18n?.key === "API_ERROR_STEP");
+      assert.equal(errEvents2.length, 2);
+      assert.match(errEvents2[0].title, /Attempt #3/);
+      assert.equal(snap2.verdict.severity, "danger");
+
+      const snapOther = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 120 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "zh" },
+        requestedConvId: convOther,
+      });
+      assert.equal(snapOther.events.some((e) => e.i18n?.key === "API_ERROR_STEP"), false);
+
+      // stale-idle 过期后自动清理 latestError
+      const oldTime = new Date(Date.now() - 12 * 60 * 1000);
+      utimesSync(transcriptPath, oldTime, oldTime);
+      store.resolveActiveConversation(convErr).transcript.latestStepAt = oldTime.getTime();
+      store.resolveActiveConversation(convErr).transcript.mtimeMs = oldTime.getTime();
+      assert.equal(store.scanTranscript(convErr, false), true);
+      assert.equal(store.resolveActiveConversation(convErr).transcript.inferredPhase, "idle");
+      assert.equal(store.resolveActiveConversation(convErr).transcript.latestError, null);
+
+      // 恢复后收到终态 PLANNER_RESPONSE，清空 latestError 并回归 IDLE
+      appendFileSync(
+        transcriptPath,
+        JSON.stringify({
+          step_index: 213,
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          content: "ok",
+          created_at: new Date().toISOString(),
+        }) + "\n",
+        "utf8",
+      );
+      assert.equal(store.scanTranscript(convErr, true), true);
+      const snapRecovered = store.buildSnapshot({
+        probes: [{ ok: true, latencyMs: 120 }],
+        consecutiveFailures: 0,
+        ls: { running: true, healthz: { reachable: true } },
+        simulation: { active: false },
+        config: { stallThresholdSec: 25, lang: "zh" },
+        requestedConvId: convErr,
+      });
+      assert.equal(snapRecovered.transcript.latestError, null);
+      assert.equal(snapRecovered.verdict.code, "IDLE");
+    });
+  });
 });

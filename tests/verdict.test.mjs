@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  inferTranscriptPhase,
+  parseTranscriptError,
+} from "../sidecars/status-monitor/lib/transcript-reader.mjs";
+import {
   computeVerdict,
   selectEffectiveProbe,
 } from "../sidecars/status-monitor/lib/verdict.mjs";
@@ -379,5 +383,238 @@ describe("computeVerdict（核心状态诊断引擎）", () => {
     assert.equal(freshVerdict.elapsedSec, 5);
     assert.equal(freshVerdict.hookAgeSec, 5);
     assert.equal(freshVerdict.activityAgeSec, 5);
+  });
+
+  it("ERROR_MESSAGE 后台重试时不误报 IDLE，正确识别为 API_RETRY 并覆盖边界条件", () => {
+    const t0 = 1_700_000_000_000;
+    const uploadErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error:
+        'API error (attempt 1): request failed: Post "https://example.invalid/v1internal:streamGenerateContent": write tcp 192.0.2.1:50001->192.0.2.2:443: wsasend: An existing connection was forcibly closed by the remote host.',
+    });
+
+    // 1. PreInvocation 在 T0，ERROR_MESSAGE (attempt 1, wsasend) 在 T0+52s，now = T0+109s，探针绿灯 306ms
+    const retrying = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepIndex: 212,
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 52_000,
+        inferredPhase: "waiting_llm",
+        latestError: uploadErr,
+      },
+      ls: { running: true, healthz: { reachable: true }, established443: 6, synSent443: 0 },
+      probes: [{ ok: true, latencyMs: 306 }],
+      consecutiveFailures: 0,
+      config: { stallThresholdSec: 25, lang: "zh" },
+      now: t0 + 109_000,
+    });
+    assert.equal(retrying.code, "API_RETRY");
+    assert.equal(retrying.severity, "warning");
+    assert.equal(retrying.phase, "waiting_llm");
+    assert.equal(retrying.messageKey, "API_UPLOAD_RESET");
+    assert.match(retrying.headline, /接口上传中断.*第 1 次/);
+    assert.match(retrying.summary, /\/compact/);
+    assert.doesNotMatch(retrying.summary, /192\.0\.2\.1/);
+
+    // 2. attempt >= 3 或 network_error 升级为 danger，但仍为 API_RETRY（不触碰 DISCONNECTED_HANG 通知）
+    const attempt3 = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 52_000,
+        inferredPhase: "waiting_llm",
+        latestError: { ...uploadErr, attempt: 3 },
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      consecutiveFailures: 0,
+      now: t0 + 60_000,
+    });
+    assert.equal(attempt3.code, "API_RETRY");
+    assert.equal(attempt3.severity, "danger");
+
+    const netErrRetry = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 10_000,
+        inferredPhase: "waiting_llm",
+        latestError: parseTranscriptError({
+          type: "ERROR_MESSAGE",
+          error: "agent executor error: model unreachable: dial tcp 192.0.2.2:443: connection refused",
+        }),
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      config: { lang: "en" },
+      now: t0 + 15_000,
+    });
+    assert.equal(netErrRetry.code, "API_RETRY");
+    assert.equal(netErrRetry.severity, "danger");
+    assert.equal(netErrRetry.messageKey, "API_STREAM_ERROR");
+    assert.match(netErrRetry.headline, /Model API Error/);
+
+    // 3. 若同时上游探针连续失败 2 次，优先升级为 DISCONNECTED_HANG
+    const withProbeDown = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 52_000,
+        inferredPhase: "waiting_llm",
+        latestError: uploadErr,
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      consecutiveFailures: 2,
+      now: t0 + 60_000,
+    });
+    assert.equal(withProbeDown.code, "DISCONNECTED_HANG");
+    assert.equal(withProbeDown.messageKey, "NET_DOWN_HANG");
+
+    // 4. Stop Hook 在 ERROR_MESSAGE 之后到达 -> IDLE
+    const stoppedAfterError = computeVerdict({
+      hook: { phase: "idle", lastEvent: "Stop", lastEventAt: t0 + 60_000 },
+      transcript: {
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 52_000,
+        latestRecordCreatedAt: t0 + 52_000,
+        inferredPhase: "waiting_llm",
+        latestError: uploadErr,
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      probes: [{ ok: true, latencyMs: 120 }],
+      now: t0 + 62_000,
+    });
+    assert.equal(stoppedAfterError.code, "IDLE");
+
+    // 5. 新 PreInvocation 在旧 ERROR_MESSAGE 之后 > 1s 到达 -> 清除旧报错，恢复 WAITING_LLM
+    const newPreAfterOldErr = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 + 70_000 },
+      transcript: {
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 52_000,
+        inferredPhase: "waiting_llm",
+        latestError: uploadErr,
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      now: t0 + 75_000,
+    });
+    assert.equal(newPreAfterOldErr.code, "WAITING_LLM");
+
+    // 6. 活跃 PreInvocation (<5m) 期间写入未知非终态日志步骤时保持 waiting_llm；若是终态 PLANNER_RESPONSE 则回 IDLE
+    const unknownStepDuringHook = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepType: "FUTURE_INTERMEDIATE_STEP",
+        latestStepAt: t0 + 10_000,
+        inferredPhase: "idle",
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      now: t0 + 15_000,
+    });
+    assert.equal(unknownStepDuringHook.code, "WAITING_LLM");
+    assert.equal(unknownStepDuringHook.source, "hook");
+
+    const terminalPlannerDuringHook = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepType: "PLANNER_RESPONSE",
+        latestStepAt: t0 + 10_000,
+        inferredPhase: "idle",
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      probes: [{ ok: true, latencyMs: 95 }],
+      now: t0 + 15_000,
+    });
+    assert.equal(terminalPlannerDuringHook.code, "IDLE");
+
+    // 7. tool_parse 类型 ERROR_MESSAGE 不触发 API_RETRY
+    const toolParseVerdict = computeVerdict({
+      hook: { phase: "waiting_llm", lastEvent: "PreInvocation", lastEventAt: t0 },
+      transcript: {
+        latestStepType: "ERROR_MESSAGE",
+        latestStepAt: t0 + 5_000,
+        inferredPhase: "waiting_llm",
+        latestError: parseTranscriptError({
+          type: "ERROR_MESSAGE",
+          error: "There was a problem parsing the tool call.",
+        }),
+      },
+      ls: { running: true, healthz: { reachable: true } },
+      now: t0 + 8_000,
+    });
+    assert.equal(toolParseVerdict.code, "WAITING_LLM");
+  });
+});
+
+describe("transcript-reader 错误解析与阶段推断", () => {
+  it("parseTranscriptError 分类提取并脱敏各类 ERROR_MESSAGE", () => {
+    assert.equal(parseTranscriptError(null), null);
+    assert.equal(parseTranscriptError({ type: "PLANNER_RESPONSE", status: "DONE" }), null);
+
+    const emptyErr = parseTranscriptError({ type: "ERROR_MESSAGE" });
+    assert.equal(emptyErr.kind, "unknown");
+    assert.equal(emptyErr.attempt, null);
+    assert.equal(emptyErr.shortReason, "API error");
+
+    const wsasendErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error:
+        'API error (attempt 2): request failed: Post "https://example.invalid/v1": write tcp 192.0.2.10:54321->192.0.2.20:443: wsasend: An existing connection was forcibly closed by the remote host.',
+    });
+    assert.equal(wsasendErr.kind, "upload_reset");
+    assert.equal(wsasendErr.attempt, 2);
+    assert.equal(wsasendErr.shortReason, "wsasend: connection forcibly closed");
+    assert.doesNotMatch(wsasendErr.shortReason, /192\.0\.2/);
+
+    const eofErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error: 'API error (attempt 4): Post "https://example.invalid/v1": EOF',
+    });
+    assert.equal(eofErr.kind, "upstream_eof");
+    assert.equal(eofErr.attempt, 4);
+    assert.equal(eofErr.shortReason, "upstream EOF");
+
+    const timeoutErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error: "API error (attempt 1): request failed: stream idle timeout (5m0s): context canceled",
+    });
+    assert.equal(timeoutErr.kind, "stream_timeout");
+    assert.equal(timeoutErr.shortReason, "stream idle timeout (5m0s)");
+
+    const interruptedErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error: "The stream was interrupted. Please continue the task you were working on.",
+    });
+    assert.equal(interruptedErr.kind, "stream_interrupted");
+    assert.equal(interruptedErr.shortReason, "stream interrupted");
+
+    const unreachableErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error: "agent executor error: model unreachable: no such host",
+    });
+    assert.equal(unreachableErr.kind, "network_error");
+    assert.equal(unreachableErr.shortReason, "model API unreachable");
+
+    const toolParseErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error: "There was a problem parsing the tool call.",
+    });
+    assert.equal(toolParseErr.kind, "tool_parse");
+
+    const genericErr = parseTranscriptError({
+      type: "ERROR_MESSAGE",
+      error: 'API error (attempt 2): Post "https://example.invalid/v1": HTTP 503 upstream busy',
+    });
+    assert.equal(genericErr.kind, "api_error");
+    assert.equal(genericErr.attempt, 2);
+    assert.doesNotMatch(genericErr.shortReason, /https:\/\//);
+    assert.match(genericErr.shortReason, /HTTP 503 upstream busy/);
+  });
+
+  it("inferTranscriptPhase 识别 ERROR_MESSAGE 与中间步骤并在过期时回退 idle", () => {
+    for (const type of ["ERROR_MESSAGE", "RUN_COMMAND", "SYSTEM_MESSAGE", "CHECKPOINT"]) {
+      assert.equal(inferTranscriptPhase({ type }, true), "waiting_llm");
+      assert.equal(inferTranscriptPhase({ type }, false), "idle");
+    }
+    assert.equal(inferTranscriptPhase({ type: "PLANNER_RESPONSE", status: "DONE" }, true), "idle");
   });
 });

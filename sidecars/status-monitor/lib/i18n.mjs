@@ -24,6 +24,16 @@ const VERDICT_COPY = {
       headline: "网络抖动 · 正在复测连通性",
       summary: `正在等待模型响应（${elapsedSec}s），最近一次网络探测失败，正在进行二次确认…`,
     }),
+    API_UPLOAD_RESET: ({ attempt, shortReason, elapsedSec }) => ({
+      headline:
+        attempt != null ? `接口上传中断 · 重试中 (第 ${attempt} 次)` : "接口上传中断 · 正在重试",
+      summary: `模型请求上传被远端重置（${shortReason}），已等待 ${elapsedSec}s；轻探针正常但大上下文或 TUN 线路可能不稳定，建议 /compact 压缩上下文或切换节点。`,
+    }),
+    API_STREAM_ERROR: ({ attempt, shortReason, elapsedSec }) => ({
+      headline:
+        attempt != null ? `模型接口报错 · 重试中 (第 ${attempt} 次)` : "模型接口报错 · 正在重试",
+      summary: `模型 API 请求失败（${shortReason}），已等待 ${elapsedSec}s，正在后台重试；若持续卡住建议取消重发、/compact 压缩上下文或切换节点。`,
+    }),
     MODEL_STALL: ({ silentSec }) => ({
       headline: "响应较慢 · 疑似模型端卡顿",
       summary: `网络探针正常，但已 ${silentSec}s 无新响应或日志写入，模型可能正在深度思考或排队超时。`,
@@ -68,6 +78,20 @@ const VERDICT_COPY = {
     NET_SUSPECT: ({ elapsedSec }) => ({
       headline: "Network Jitter · Re-testing Connectivity",
       summary: `Waiting for model (${elapsedSec}s); latest probe failed and is being re-verified…`,
+    }),
+    API_UPLOAD_RESET: ({ attempt, shortReason, elapsedSec }) => ({
+      headline:
+        attempt != null
+          ? `API Upload Reset · Retrying (#${attempt})`
+          : "API Upload Reset · Retrying",
+      summary: `Model request upload was forcibly closed (${shortReason}, ${elapsedSec}s elapsed). Short probes pass, but large context or TUN route may be unstable; try /compact or switching proxy node.`,
+    }),
+    API_STREAM_ERROR: ({ attempt, shortReason, elapsedSec }) => ({
+      headline:
+        attempt != null
+          ? `Model API Error · Retrying (#${attempt})`
+          : "Model API Error · Retrying",
+      summary: `Model API request failed (${shortReason}, ${elapsedSec}s elapsed) and may be retrying; if it keeps stalling, cancel, run /compact, or switch proxy node.`,
     }),
     MODEL_STALL: ({ silentSec }) => ({
       headline: "Slow Response · Possible Model Stall",
@@ -140,6 +164,12 @@ const EVENT_COPY = {
       title: "检测到系统 PAC 自动代理",
       detail: `暂不支持解析 PAC 脚本，已按直连探测（可在设置中手动填代理）(${pacUrl || "AutoConfigURL"})`,
     }),
+    API_ERROR_STEP: ({ attempt, shortReason, shortConv, stepIdx }) => ({
+      title: attempt != null ? `模型 API 报错（第 ${attempt} 次重试）` : "模型 API 报错",
+      detail: [shortConv, stepIdx != null ? `Step #${stepIdx}` : "", shortReason]
+        .filter(Boolean)
+        .join(" · "),
+    }),
   },
   en: {
     TOOL_STEP: ({ tools, shortConv, stepIdx }) => ({
@@ -175,6 +205,12 @@ const EVENT_COPY = {
     PAC_UNSUPPORTED: ({ pacUrl }) => ({
       title: "System PAC Proxy Detected",
       detail: `PAC scripts are unsupported; probing direct (set manual proxy if needed) (${pacUrl || "AutoConfigURL"})`,
+    }),
+    API_ERROR_STEP: ({ attempt, shortReason, shortConv, stepIdx }) => ({
+      title: attempt != null ? `Model API Error (Attempt #${attempt})` : "Model API Error",
+      detail: [shortConv, stepIdx != null ? `Step #${stepIdx}` : "", shortReason]
+        .filter(Boolean)
+        .join(" · "),
     }),
   },
 };

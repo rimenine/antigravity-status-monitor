@@ -259,11 +259,16 @@
     const useHookAge =
       hasHookAge && (verdict.silentSec == null || verdict.hookAgeSec <= verdict.silentSec);
     const silentText = verdict.silentSec != null ? d.secAgo(verdict.silentSec) : d.noLog;
-    const heartbeatText = hook.lastEvent
-      ? useHookAge
-        ? `${hook.lastEvent} · ${d.hookAgo(verdict.hookAgeSec)}`
-        : `${hook.lastEvent} · ${silentText}`
-      : silentText;
+    const hasApiError =
+      transcript.latestStepType === "ERROR_MESSAGE" && transcript.latestError;
+    const heartbeatText =
+      hasApiError && !useHookAge
+        ? `${transcript.latestError.attempt != null ? d.apiErrAttempt(transcript.latestError.attempt) : d.apiErrLabel} · ${silentText}`
+        : hook.lastEvent
+          ? useHookAge
+            ? `${hook.lastEvent} · ${d.hookAgo(verdict.hookAgeSec)}`
+            : `${hook.lastEvent} · ${silentText}`
+          : silentText;
     format.setText("agentLogAge", heartbeatText);
 
     const proxyCfg = latestProbe?.proxyConfig || data.proxyConfig;

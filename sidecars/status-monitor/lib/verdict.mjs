@@ -60,13 +60,24 @@ export function computeVerdict({
     (transcript.latestRecordCreatedAt != null && transcript.latestRecordCreatedAt > hook.lastEventAt + 50) ||
     transcript.latestStepAt - hook.lastEventAt > 3000;
 
+  const transcriptIsTerminalPlanner =
+    transcript?.latestStepType === "PLANNER_RESPONSE" && transcript?.inferredPhase === "idle";
+  const keepActiveHookOverUnknownTranscript =
+    hook?.lastEvent === "PreInvocation" &&
+    hook?.phase !== "idle" &&
+    Number.isFinite(hook?.lastEventAt) &&
+    hookAgeMs < 5 * 60 * 1000 &&
+    transcript?.inferredPhase === "idle" &&
+    !transcriptIsTerminalPlanner;
+
   let phase = "idle";
   let source = "none";
   if (
     hook?.lastEventAt &&
     (!transcript?.latestStepAt ||
       hook.lastEventAt >= transcript.latestStepAt ||
-      (hookIsStop && !transcriptAdvancedPastStop))
+      (hookIsStop && !transcriptAdvancedPastStop) ||
+      keepActiveHookOverUnknownTranscript)
   ) {
     const timedOutWithIdleTranscript =
       hook.phase !== "idle" && hookAgeMs > 5 * 60 * 1000 && transcript?.inferredPhase === "idle";
@@ -99,6 +110,16 @@ export function computeVerdict({
   const lsDown = ls?.running === false || ls?.healthz?.reachable === false;
   const lsSynStall = (ls?.synSent443 || 0) > 0;
 
+  const latestError = transcript?.latestStepType === "ERROR_MESSAGE" ? transcript.latestError : null;
+  const apiErrorIsCurrent = Boolean(
+    latestError &&
+      latestError.kind !== "tool_parse" &&
+      (!hook?.lastEventAt ||
+        hook.lastEvent !== "PreInvocation" ||
+        !transcript?.latestStepAt ||
+        transcript.latestStepAt >= hook.lastEventAt - 1000),
+  );
+
   const lang = config?.lang || "zh";
   let code;
   let severity;
@@ -121,6 +142,17 @@ export function computeVerdict({
       severity = "danger";
       messageKey = "NET_DOWN_HANG";
       messageParams = { elapsedSec, consecutiveFailures };
+    } else if (apiErrorIsCurrent) {
+      const attempt = latestError.attempt ?? null;
+      const isSevere = (attempt != null && attempt >= 3) || latestError.kind === "network_error";
+      code = "API_RETRY";
+      severity = isSevere ? "danger" : "warning";
+      messageKey = latestError.kind === "upload_reset" ? "API_UPLOAD_RESET" : "API_STREAM_ERROR";
+      messageParams = {
+        attempt,
+        shortReason: latestError.shortReason || "API error",
+        elapsedSec,
+      };
     } else if (lsSynStall && elapsedSec >= 6) {
       code = "SUSPECT_STALL";
       severity = "warning";

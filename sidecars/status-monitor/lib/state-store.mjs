@@ -29,6 +29,7 @@ export function createStateStore({
   const fixedDefaultConvId = normalizeConvId(defaultConvId);
   const conversations = new Map();
   const loggedToolSteps = new Set();
+  const loggedErrorSteps = new Set();
   const timeline = createTimelineStore();
 
   function getOrCreateConv(convId) {
@@ -76,6 +77,7 @@ export function createStateStore({
 
     if (result.status === "stale-idle" && existingConv?.transcript) {
       existingConv.transcript.inferredPhase = "idle";
+      existingConv.transcript.latestError = null;
       return true;
     }
     if (result.status !== "updated") {
@@ -89,7 +91,9 @@ export function createStateStore({
       conv.transcript.inferredPhase !== nextT.inferredPhase ||
       conv.transcript.conversationId !== targetId ||
       conv.transcript.size !== nextT.size ||
-      conv.transcript.latestStepAt !== nextT.latestStepAt;
+      conv.transcript.latestStepAt !== nextT.latestStepAt ||
+      conv.transcript.latestError?.shortReason !== nextT.latestError?.shortReason ||
+      conv.transcript.latestError?.attempt !== nextT.latestError?.attempt;
 
     if (
       recordTimeline &&
@@ -110,6 +114,39 @@ export function createStateStore({
           "info",
           targetId,
           { key: "TOOL_STEP", params: { tools: result.lastToolName, shortConv, stepIdx: result.lastStepIndex } },
+        );
+      }
+    }
+
+    if (
+      recordTimeline &&
+      nextT.latestStepType === "ERROR_MESSAGE" &&
+      nextT.latestError &&
+      nextT.latestError.kind !== "tool_parse" &&
+      result.lastStepIndex != null &&
+      now - result.latestStepAt < 30_000
+    ) {
+      const errKey = `${targetId}:${result.lastStepIndex}:${nextT.latestRecordCreatedAt ?? result.latestStepAt}`;
+      if (!loggedErrorSteps.has(errKey)) {
+        if (loggedErrorSteps.size > 200) loggedErrorSteps.clear();
+        loggedErrorSteps.add(errKey);
+        const attempt = nextT.latestError.attempt ?? null;
+        const shortReason = nextT.latestError.shortReason || "API error";
+        const shortConv = targetId !== "default" ? `#${targetId.slice(0, 6)}` : "";
+        const level =
+          (attempt != null && attempt >= 3) || nextT.latestError.kind === "network_error"
+            ? "error"
+            : "warn";
+        pushTimelineEvent(
+          "error",
+          attempt != null ? `模型 API 报错（第 ${attempt} 次重试）` : "模型 API 报错",
+          [shortConv, `Step #${result.lastStepIndex}`, shortReason].filter(Boolean).join(" · "),
+          level,
+          targetId,
+          {
+            key: "API_ERROR_STEP",
+            params: { attempt, shortReason, shortConv, stepIdx: result.lastStepIndex },
+          },
         );
       }
     }
