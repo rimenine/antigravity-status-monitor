@@ -1,7 +1,7 @@
 {
   "name": "agent-status-monitor",
   "displayName": "Antigravity Status Monitor",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Real-time Antigravity Sidecar to track agent phases, Lifecycle Hooks, upstream reachability, and session token stats — helping distinguish active work from silent \"Working\" hangs.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [

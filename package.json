@@ -1,6 +1,6 @@
 {
   "name": "agent-status-monitor",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "type": "module",
   "description": "Antigravity Status Monitor plugin with Sidecar dashboard, Lifecycle Hooks, and zero-dependency test suite.",
