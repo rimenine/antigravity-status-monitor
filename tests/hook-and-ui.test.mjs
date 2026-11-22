@@ -479,11 +479,19 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
           ? await runCommand("powershell", [
               "-NoProfile",
               "-Command",
-              `Expand-Archive -Path '${join(outDir, "agent-status-monitor.zip").replace(/'/g, "''")}' -DestinationPath '${zipExtract.replace(/'/g, "''")}' -Force`,
+              `$ErrorActionPreference = 'Stop'; Add-Type -AssemblyName System.IO.Compression.FileSystem; [System.IO.Compression.ZipFile]::ExtractToDirectory('${join(outDir, "agent-status-monitor.zip").replace(/'/g, "''")}', '${zipExtract.replace(/'/g, "''")}')`,
             ])
           : await runCommand("unzip", ["-q", join(outDir, "agent-status-monitor.zip"), "-d", zipExtract]);
-      assert.equal(zipCmd.code, 0, zipCmd.stderr || zipCmd.stdout);
-      assert.equal(existsSync(join(zipExtract, "agent-status-monitor", "sidecars", "status-monitor", "server.mjs")), true);
+      assert.equal(
+        zipCmd.code,
+        0,
+        `zip extract failed (code=${zipCmd.code}): stderr=${zipCmd.stderr} stdout=${zipCmd.stdout}`,
+      );
+      assert.equal(
+        existsSync(join(zipExtract, "agent-status-monitor", "sidecars", "status-monitor", "server.mjs")),
+        true,
+        `server.mjs missing after zip extract (zipExtract=${zipExtract}, entries=${readdirSync(zipExtract).join(",")}, stderr=${zipCmd.stderr}, stdout=${zipCmd.stdout})`,
+      );
       assert.equal(existsSync(join(zipExtract, "agent-status-monitor", "tests")), false);
     });
   });
