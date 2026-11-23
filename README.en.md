@@ -2,17 +2,23 @@
 
 # Antigravity Status Monitor (`antigravity-status-monitor`)
 
-When running long agent tasks in Antigravity, the main UI can stay stuck on a spinning **"Working"** state with no visible output — either because the model or local tools are still running, or because the request silently hung underneath due to a stalled stream or dropped connection.
+During long Antigravity runs, the main UI can stay stuck on a spinning **"Working"** indicator with no output — sometimes the model or local tools are genuinely busy, and other times a dropped VPN, TUN route glitch, or broken proxy has silently stalled the request.
 
-Built with **zero external dependencies**, this Sidecar sits in Antigravity's auxiliary pane and brings together Lifecycle Hooks, `transcript.jsonl` writes, the local `Language Server` socket, upstream HTTPS probes, and token counts so you can quickly tell real progress apart from a silent hang ("false working" state).
+**Antigravity Status Monitor** is a **local-only, zero-dependency** side-pane dashboard that unifies live agent phases, host `Language Server` health, direct/proxy HTTPS reachability probes, and token usage. At a glance, you can tell active progress apart from a silent hang — with desktop alerts and inline recovery actions when connectivity drops.
+
+- **Clear status at a glance**: Separates thinking, tool execution, pending background tasks, API retries, and upstream hangs so you neither wait blindly nor cancel healthy work.
+- **Built for narrow side panes**: Adapts cleanly from narrow auxiliary panes to dual-column desktop views, with host-matched Dark/Light themes, EN/ZH localization, 15s alert drills, and in-page hover tooltips.
+- **Private and local by design**: Binds strictly to `127.0.0.1` with token-authenticated APIs and strict offline CSP; probes send lightweight reachability checks with zero account credentials or telemetry.
 
 ---
 
 ## UI Preview
 
-| Live Working State & Probe Chart | Hang Alert & Toast Preview | Settings & Live Event Stream |
+| Live Working State & Tooltip | Disconnect Drill & Inline Actions | Light Settings & Detection Guide |
 | :---: | :---: | :---: |
-| <img src="docs/screenshots/status-working-en.jpg" alt="Live Working State and Upstream Probe Chart" width="240" /> | <img src="docs/screenshots/alert-preview-en.jpg" alt="Simulated Hang Alert Banner and Desktop Notification" width="240" /> | <img src="docs/screenshots/settings-events-en.jpg" alt="Monitor Settings and Live Event Stream" width="240" /> |
+| <img src="docs/screenshots/status-working-en.jpg" alt="Live working state with probe chart and in-page hover tooltip" width="240" /> | <img src="docs/screenshots/alert-preview-en.jpg" alt="Disconnect alert drill with inline probe and proxy actions" width="240" /> | <img src="docs/screenshots/settings-events-en.jpg" alt="Light theme monitor settings and detection scope disclosure" width="240" /> |
+
+> Click any screenshot to inspect full resolution: dark working state with in-page hover tooltip (left), 15s disconnect alert drill with inline actions (center), and light-theme settings with expanded "How detection works" disclosure (right).
 
 ---
 
@@ -23,8 +29,8 @@ Because a single spinner hides where execution paused, the panel tracks four dir
 1. **Lifecycle Hooks + Transcript Phase Inference, Background Tasks & API Retry Detection**
    - [hooks.json](hooks.json) registers only `PreInvocation` and `Stop` (using Antigravity's bundled `agy-node` first, falling back to `node`).
    - **Pending Background Task State (`BACKGROUND_TASK`)**: When a turn finishes while background commands or subagents are still running, parses `Stop` Hook `fullyIdle: false` (alongside a `transcript.jsonl` unfinished background-task fallback) to show **Background Task · Waiting for Wakeup** instead of falsely dropping to `IDLE` or triggering false `25s` stall alerts, and resumes seamlessly when Antigravity wakes back up.
-   - **Parallel Tool Progress & Aborted Status Guard**: Keeps `WORKING · TOOL` while a multi-tool `PLANNER_RESPONSE` has only partially written back its results, and returns immediately to `IDLE` when an aborted `PLANNER_RESPONSE` (`CANCELLED`/`ERROR`) still carries `tool_calls`.
-   - Resets silence timers immediately on new Hooks or `transcript.jsonl` writes, and parses `ERROR_MESSAGE` retries (`wsasend` upload resets, `EOF`, `stream idle timeout`, `model unreachable`, with a 3-minute expiry window) plus intermediate steps to surface `RETRY · API ERROR` directly.
+   - **Parallel Tool Progress & Aborted Status Guard**: Keeps `RUNNING TOOL` while a multi-tool `PLANNER_RESPONSE` has only partially written back its results, and returns immediately to `IDLE` when an aborted `PLANNER_RESPONSE` (`CANCELLED`/`ERROR`) still carries `tool_calls`.
+   - Resets silence timers immediately on new Hooks or `transcript.jsonl` writes, and parses `ERROR_MESSAGE` retries (`wsasend` upload resets, `EOF`, `stream idle timeout`, `model unreachable`, with a 3-minute expiry window) plus intermediate steps to surface `API RETRY` directly.
 2. **Dual-Link Upstream HTTPS Probes, Tiered Debounce & Isolated Polling**
    - Periodically opens short-lived HTTPS `GET` probes (defaulting to `https://daily-cloudcode-pa.googleapis.com`, `4000ms` timeout) across direct/TUN and proxy routes (env vars, OS settings, or manual HTTP `Basic` / unauthenticated SOCKS5 proxy), combined with host `Language Server` 443 socket state.
    - **Tiered Debounce, Mixed-Route Correction & Sleep Guard**: Hard errors (`ENOTFOUND`, `ECONNREFUSED`, blocked HTTP statuses) trigger `DISCONNECTED_HANG` after 2 consecutive failures, while pure timeouts enter `NET_SUSPECT` on failure #2 and confirm on failure #3; active `proxyConns` with a healthy proxy and failing direct path prefer `proxy` (preventing carrier-grade NAT `100.64.0.0/10` or stray direct sockets from causing false offline alerts); sleep/wake clock jumps reset stale failure streaks cleanly.
@@ -43,9 +49,9 @@ Because a single spinner hides where execution paused, the panel tracks four dir
 
 This is a lightweight Sidecar status monitor rather than a packet-level inspector, with a few practical boundaries:
 
-* **Fresh short probes passing doesn't guarantee an old stream is alive**: Probes open new short-lived HTTPS connections to check DNS/TLS/HTTP reachability (`2xx/3xx` and `400/404/405/410` count as reachable since `daily-cloudcode-pa.googleapis.com` returns `404` on `/`; `401/403/407/408/429/451` and `5xx` count as blocked or failed). When Antigravity logs an `ERROR_MESSAGE` retry entry (e.g., an aborted large upload via `wsasend` or stream reset), the panel surfaces `RETRY · API ERROR` immediately; if an open request hangs silently before any error log is written while fresh probes pass, the panel will lean toward **Possible Model Stall**.
+* **Fresh short probes passing doesn't guarantee an old stream is alive**: Probes open new short-lived HTTPS connections to check DNS/TLS/HTTP reachability (`2xx/3xx` and `400/404/405/410` count as reachable since `daily-cloudcode-pa.googleapis.com` returns `404` on `/`; `401/403/407/408/429/451` and `5xx` count as blocked or failed). When Antigravity logs an `ERROR_MESSAGE` retry entry (e.g., an aborted large upload via `wsasend` or stream reset), the panel surfaces `API RETRY` immediately; if an open request hangs silently before any error log is written while fresh probes pass, the panel will lean toward **Possible Model Stall**.
 * **What proxy & TUN detection covers**: Automatically reads **HTTP proxies** (including `Basic` auth) and **unauthenticated SOCKS5 proxies** from environment variables (`HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`), Windows registry `HKCU`/`HKLM` (with `ProxyOverride` and `DefaultConnectionSettings`), macOS `scutil` (with `ExceptionsList`), and Linux GNOME `gsettings` (with `ignore-hosts`), plus a **Manual Proxy** box in Settings when you need an override (for PAC, non-GNOME Linux, standalone SOCKS5, etc.). **It does not evaluate PAC scripts (warns instead), `https://` or `socks4://` proxies, password-authenticated SOCKS5, enterprise NTLM auth, or process-injected transparent proxies; corporate MITM root certs not trusted by Node can also report TLS failures.** TUN interfaces are heuristically tagged using `198.18.0.0/15` (Fake-IP) and `100.64.0.0/10` (CGNAT / Tailscale / WireGuard); when active proxy connections exist and the proxy probe succeeds while direct fails, mixed-route fallback still trusts the working proxy (preventing ISP CGNAT `100.64.0.0/10` addresses from causing false alerts).
-* **Timeouts & high-reasoning models**: Default single probe timeout is `4000ms` (pure timeouts debounce for `3` checks before raising `DISCONNECTED_HANG`, whereas hard network errors trigger at `2`). Because Antigravity flushes `PLANNER_RESPONSE` after finishing a full generation, deep-reasoning runs (`> 25s`) may briefly show `Slow Response` unless you raise the stall threshold to `45s` in Settings.
+* **Timeouts & high-reasoning models**: Default single probe timeout is `4000ms` (pure timeouts debounce for `3` checks before raising `DISCONNECTED_HANG`, whereas hard network errors trigger at `2`). Because Antigravity flushes `PLANNER_RESPONSE` after finishing a full generation, deep-reasoning runs (`> 25s`) may briefly show `STALLED` unless you raise the stall threshold to `45s` in Settings.
 * **Small runtime footprint**: Antigravity spawns a short-lived Node/agy-node hook process on `PreInvocation` and `Stop`, while the Sidecar stays resident alongside the host.
 * **Authenticated local API routes**: All `GET /api/*` (`/api/status`, `/api/events`) and `POST /api/*` routes require `X-Sidecar-Token` (or `?token=` for `EventSource`) by default alongside loopback `Host`, `Sec-Fetch-Site`, and `Origin` checks. Unauthenticated or cross-site local probes are rejected with `401`/`403`.
 * **Token math**: `total` simply adds raw `input_tokens + cache_read_tokens + output_tokens` occurrences across turns. Treat it as a rough sense of session workload and cache hit ratio rather than exact billing or quota usage. Live session stats follow the Hook-reported path; all-time stats scan `transcript.jsonl` (falling back to `transcript_full.jsonl`).
@@ -133,8 +139,10 @@ After installation, open or restart Antigravity (or toggle the plugin off and ba
 
 ## Controls & Configuration
 
-- **Top bar actions**: `Probe` (run immediate connectivity test), `Test Alert` (15-second simulated hang alert preview), and **Settings gear icon**.
-- **Configurable options**: Language (`中文` / `English`, auto-detected from system locale on first run), probe interval (`2s` / `3s` / `5s`), stall threshold (`15s` / `25s` / `45s`), probe target, manual proxy override, theme (`Follow Host / System`, `Dark Obsidian`, `Light Minimal`), and desktop hang notification toggle.
+- **Top bar actions**: `Probe` (run immediate connectivity test), `Test Alert` / `Stop Test` (15-second simulated hang drill), and **Settings gear icon** (toggles settings below the header; press `Esc` to close and restore focus).
+- **Inline recovery & hover tooltips**: Disconnect alerts include **Probe Now**, **Proxy Settings**, and **Stop Test** buttons; dotted-underlined indicators (`HTTP 404` reachability, `Healthy`, HTTPS connections, sparkline samples, and short chat IDs) display crisp in-page hover tooltips.
+- **Configurable options**: Language (`中文` / `English`, auto-detected from system locale on first run), probe interval (`2s` / `3s` / `5s`), stall threshold (`15s` / `25s` / `45s`), probe target, manual proxy override, theme (`Follow Host / System`, `Dark`, `Light`), desktop hang notification toggle, and a collapsible `How detection works` disclosure.
+- **Token breakdown**: Shows live Context, Session, Today Total, cache ratio, and breakdown bar by default; expand **Breakdown** for raw input, cache read, and output totals plus counting notes.
 
 ---
 
@@ -192,7 +200,7 @@ antigravity-status-monitor/
     └── public/
         ├── index.html
         ├── styles.css
-        ├── app.js                  # Dashboard bootstrap & UI event bindings
+        ├── app.js                  # Dashboard bootstrap, focus handling & hover tooltips
         └── js/
             ├── i18n.js             # Frontend zh/en dictionaries & static i18n
             ├── format.js           # Duration/token formatters & adaptive theme resolver

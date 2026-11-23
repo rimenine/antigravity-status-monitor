@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Antigravity Status Monitor</title>
   <link rel="stylesheet" href="/styles.css" />
   <script src="/preload.js"></script>
@@ -17,17 +17,17 @@
   <main class="shell">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-dot" id="sseDot" title="Local monitor connection status" data-i18n-title="sseDotTitle"></span>
+        <span class="brand-dot" id="sseDot" data-tip="Local monitor connection status" data-i18n-title="sseDotTitle"></span>
         <span class="brand-title" data-i18n="brandTitle">Status Monitor</span>
       </div>
       <div class="top-actions">
-        <button id="btnProbe" title="Probe network now" data-i18n-title="btnProbeTitle">
+        <button id="btnProbe" data-tip="Run an immediate upstream network probe" data-i18n-title="btnProbeTitle">
           <span data-i18n="btnProbe">Probe</span>
         </button>
-        <button id="btnSim" title="Simulate upstream hang alert (15s)" data-i18n-title="btnSimTitle">
+        <button id="btnSim" class="btn-ghost" data-tip="Run a 15s disconnect alert test" data-i18n-title="btnSimTitle">
           <span id="btnSimText" data-i18n="btnSimStart">Test Alert</span>
         </button>
-        <button id="btnSettings" class="icon-btn" title="Toggle settings" data-i18n-title="btnSettingsTitle" aria-label="Settings">
+        <button id="btnSettings" class="icon-btn" data-tip="Toggle settings" data-i18n-title="btnSettingsTitle" aria-label="Settings" aria-expanded="false" aria-controls="settingsPanel">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="12" cy="12" r="3"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
@@ -36,178 +36,227 @@
       </div>
     </header>
 
-    <div class="action-banner" id="actionBanner" role="status" aria-live="polite"></div>
-
-    <section class="card hero" id="heroCard" data-severity="neutral">
-      <div class="hero-main">
-        <div class="orb-wrap">
-          <div class="orb-ring"></div>
-          <div class="orb-core" id="orbIcon"></div>
-        </div>
-        <div class="hero-copy">
-          <div class="hero-top">
-            <span class="badge" id="verdictBadge">INIT</span>
-            <span class="timer" id="elapsedTimer">--:--</span>
+    <section class="card card-flat settings-panel" id="settingsPanel">
+      <h2 class="section-title" data-i18n="settingsTitle">Monitor Settings</h2>
+      <div class="settings-groups">
+        <div class="settings-group">
+          <div class="settings-group-title" data-i18n="settingsGroupProbe">Detection &amp; Network</div>
+          <div class="setting-row">
+            <label for="cfgInterval" data-i18n="settingInterval">Probe Interval</label>
+            <select id="cfgInterval">
+              <option value="2000" data-i18n-opt="interval2s">2s (Fast)</option>
+              <option value="3000" data-i18n-opt="interval3s">3s (Recommended)</option>
+              <option value="5000" data-i18n-opt="interval5s">5s (Eco)</option>
+            </select>
           </div>
-          <h1 class="hero-title" id="verdictHeadline">Connecting to local monitor…</h1>
-          <p class="hero-desc" id="verdictSummary">Reading Hooks, transcript logs &amp; network probes.</p>
+          <div class="setting-row">
+            <label for="cfgStall" data-i18n="settingStall">Stall Threshold</label>
+            <select id="cfgStall">
+              <option value="15" data-i18n-opt="stall15">15s no activity</option>
+              <option value="25" data-i18n-opt="stall25">25s no activity</option>
+              <option value="45" data-i18n-opt="stall45">45s no activity</option>
+            </select>
+          </div>
+          <div class="setting-row">
+            <label for="cfgProbeUrl" data-i18n="settingProbeUrl">Probe Target</label>
+            <select id="cfgProbeUrl">
+              <option value="https://daily-cloudcode-pa.googleapis.com" data-i18n-opt="probeCloudCode">Cloud Code (Default)</option>
+              <option value="https://generativelanguage.googleapis.com/">Google Gemini API</option>
+              <option value="https://www.gstatic.com/generate_204">gstatic generate_204</option>
+              <option value="https://accounts.google.com/generate_204">accounts.google.com</option>
+            </select>
+          </div>
+          <div class="setting-row setting-row-stack">
+            <label for="cfgManualProxy" data-i18n="settingManualProxy">Manual Proxy (Opt.)</label>
+            <input type="text" id="cfgManualProxy" maxlength="256" placeholder="http://127.0.0.1:7897" aria-describedby="cfgManualProxyHint" spellcheck="false" />
+            <div class="setting-hint" id="cfgManualProxyHint" data-i18n="manualProxyHint">Leave blank for auto-detection. Supports http:// or unauthenticated socks5:// with port (no PAC).</div>
+          </div>
         </div>
-      </div>
 
-      <div class="alert-strip" id="alertStrip">
-        <div id="alertStripLead"><strong>Action:</strong> The main UI may still show "Working", but upstream connectivity is lost.</div>
-        <div id="alertStripSteps">1. Check your network, proxy, or VPN connection; 2. If it stays stuck, cancel and retry.</div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="chart-header">
-        <span class="section-title" data-i18n="chartTitle">Upstream HTTPS Probe</span>
-        <div class="chart-stats">
-          <span class="stat-pill"><span data-i18n="statNow">Now</span> <b id="rttNow">--</b></span>
-          <span class="stat-pill"><span data-i18n="statAvg">Avg</span> <b id="rttAvg">--</b></span>
-          <span class="stat-pill"><span data-i18n="statRate">Uptime</span> <b id="rttRate">--</b></span>
+        <div class="settings-group">
+          <div class="settings-group-title" data-i18n="settingsGroupUi">Display &amp; Alerts</div>
+          <div class="setting-row">
+            <label id="settingLangLabel" data-i18n="settingLang">Language / 语言</label>
+            <div class="lang-switch" role="group" aria-labelledby="settingLangLabel">
+              <button type="button" class="lang-opt" id="btnLangZh" data-lang="zh" aria-pressed="false">中文</button>
+              <button type="button" class="lang-opt active" id="btnLangEn" data-lang="en" aria-pressed="true">English</button>
+            </div>
+          </div>
+          <div class="setting-row">
+            <label for="cfgTheme" data-i18n="settingTheme">Theme</label>
+            <select id="cfgTheme">
+              <option value="auto" data-i18n-opt="themeAuto">Follow Host / System</option>
+              <option value="dark" data-i18n-opt="themeDark">Dark</option>
+              <option value="light" data-i18n-opt="themeLight">Light</option>
+            </select>
+          </div>
+          <div class="setting-row setting-row-toggle">
+            <label for="cfgNotify" data-i18n="settingNotify">Desktop alert on upstream hang</label>
+            <input type="checkbox" id="cfgNotify" />
+          </div>
         </div>
-      </div>
-      <div class="chart-box">
-        <div class="chart-tooltip" id="chartTooltip">Waiting for first probe…</div>
-        <svg id="sparkSvg" viewBox="0 0 360 72" preserveAspectRatio="none"></svg>
-      </div>
-    </section>
-
-    <section class="grid">
-      <div class="mini-card">
-        <div class="mini-head">
-          <span data-i18n="cardAgent">Agent Heartbeat</span>
-          <span id="agentSourceBadge">--</span>
-        </div>
-        <div class="mini-value" id="agentStepVal">--</div>
-        <div class="mini-sub" id="agentLogAge">No logs yet</div>
-      </div>
-
-      <div class="mini-card">
-        <div class="mini-head">
-          <span data-i18n="cardNet">Network Route</span>
-          <span id="netModeBadge">--</span>
-        </div>
-        <div class="mini-value" id="netStatusVal">--</div>
-        <div class="mini-sub" id="netTargetVal">--</div>
-      </div>
-
-      <div class="mini-card">
-        <div class="mini-head">
-          <span data-i18n="cardLs">Language Server</span>
-          <span id="lsHealthBadge">--</span>
-        </div>
-        <div class="mini-value" id="lsConnVal">--</div>
-        <div class="mini-sub" id="lsPidVal">--</div>
-      </div>
-    </section>
-
-    <section class="card">
-      <div class="token-header">
-        <span class="section-title" data-i18n="tokenTitle">Token Usage</span>
-        <div class="token-badges">
-          <span class="token-pill cache" id="tokCacheRate">Cache --</span>
-          <span class="token-pill" id="tokCalls">-- calls</span>
-        </div>
-      </div>
-      <div class="token-cols">
-        <div class="token-stat">
-          <div class="token-stat-label" data-i18n="tokLastLabel">Context</div>
-          <div class="token-stat-val" id="tokLastCtx">--</div>
-          <div class="token-stat-sub" id="tokLastSub">Out --</div>
-        </div>
-        <div class="token-stat">
-          <div class="token-stat-label" data-i18n="tokSessLabel">Session</div>
-          <div class="token-stat-val" id="tokSessTotal">--</div>
-          <div class="token-stat-sub" id="tokSessSub">In -- / Out --</div>
-        </div>
-        <div class="token-stat">
-          <div class="token-stat-label" data-i18n="tokTodayLabel">Today Total</div>
-          <div class="token-stat-val" id="tokTodayTotal">--</div>
-          <div class="token-stat-sub" id="tokTodaySub">-- chats</div>
-        </div>
-      </div>
-      <div class="token-bar-track" title="Session token breakdown" data-i18n-title="tokBarTitle">
-        <div class="token-seg-in" id="tokBarIn"></div>
-        <div class="token-seg-cache" id="tokBarCache"></div>
-        <div class="token-seg-out" id="tokBarOut"></div>
-      </div>
-      <div class="token-legend">
-        <span class="legend-item"><i class="legend-dot legend-dot-in"></i><span data-i18n="legInput">Input</span> <b id="tokLegIn">--</b></span>
-        <span class="legend-item"><i class="legend-dot legend-dot-cache"></i><span data-i18n="legCache">Cache Read</span> <b id="tokLegCache">--</b></span>
-        <span class="legend-item"><i class="legend-dot legend-dot-out"></i><span data-i18n="legOut">Output</span> <b id="tokLegOut">--</b></span>
-      </div>
-    </section>
-
-    <section class="card settings-panel" id="settingsPanel">
-      <div class="section-title" data-i18n="settingsTitle">Monitor Settings</div>
-      <div class="setting-row">
-        <label data-i18n="settingLang">Language / 语言</label>
-        <div class="lang-switch" role="group" aria-label="Language">
-          <button type="button" class="lang-opt" id="btnLangZh" data-lang="zh">中文</button>
-          <button type="button" class="lang-opt active" id="btnLangEn" data-lang="en">English</button>
-        </div>
-      </div>
-      <div class="setting-row">
-        <label for="cfgInterval" data-i18n="settingInterval">Probe Interval</label>
-        <select id="cfgInterval">
-          <option value="2000" data-i18n-opt="interval2s">Every 2s (Fast)</option>
-          <option value="3000" data-i18n-opt="interval3s">Every 3s (Recommended)</option>
-          <option value="5000" data-i18n-opt="interval5s">Every 5s (Eco)</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <label for="cfgStall" data-i18n="settingStall">Stall Threshold</label>
-        <select id="cfgStall">
-          <option value="15" data-i18n-opt="stall15">15s without new log</option>
-          <option value="25" data-i18n-opt="stall25">25s without new log</option>
-          <option value="45" data-i18n-opt="stall45">45s without new log</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <label for="cfgProbeUrl" data-i18n="settingProbeUrl">Probe Target</label>
-        <select id="cfgProbeUrl">
-          <option value="https://daily-cloudcode-pa.googleapis.com" data-i18n-opt="probeCloudCode">Cloud Code (Default)</option>
-          <option value="https://generativelanguage.googleapis.com/">Google Gemini API</option>
-          <option value="https://www.gstatic.com/generate_204">gstatic generate_204</option>
-          <option value="https://accounts.google.com/generate_204">accounts.google.com</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <label for="cfgManualProxy" data-i18n="settingManualProxy">Manual Proxy (Opt.)</label>
-        <input type="text" id="cfgManualProxy" placeholder="http://127.0.0.1:7897 / socks5://" spellcheck="false" />
-      </div>
-      <div class="setting-row">
-        <label for="cfgTheme" data-i18n="settingTheme">Theme</label>
-        <select id="cfgTheme">
-          <option value="auto" data-i18n-opt="themeAuto">Follow Host / System</option>
-          <option value="dark" data-i18n-opt="themeDark">Dark Obsidian</option>
-          <option value="light" data-i18n-opt="themeLight">Light Minimal</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <label for="cfgNotify" data-i18n="settingNotify">Desktop alert on upstream hang</label>
-        <input type="checkbox" id="cfgNotify" />
       </div>
       <div class="settings-error" id="cfgError" aria-live="polite"></div>
+      <details class="settings-help" id="settingsHelp">
+        <summary class="settings-help-toggle" data-i18n="settingsHelpToggle">How detection works</summary>
+        <ul class="settings-help-list">
+          <li data-i18n="settingsHelpProbe">Any upstream HTTP response (including 404) confirms reachability; a healthy probe does not guarantee an existing stream is alive.</li>
+          <li data-i18n="settingsHelpLocal">Runs locally with per-chat event isolation; alert logs stay on disk and are never uploaded.</li>
+        </ul>
+      </details>
     </section>
 
-    <section class="card">
-      <div class="timeline-head">
-        <span class="section-title" data-i18n="timelineTitle">Live Event Stream (Current Chat &amp; Network)</span>
-        <span class="tl-time" id="convBadge">Chat: --</span>
+    <div class="action-banner" id="actionBanner" role="status" aria-live="polite"></div>
+
+    <div class="workspace">
+      <div class="col-primary">
+        <section class="card hero" id="heroCard" data-severity="neutral">
+          <div class="hero-main">
+            <div class="orb-wrap">
+              <div class="orb-ring"></div>
+              <div class="orb-core" id="orbIcon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+            </div>
+            <div class="hero-copy">
+              <div class="hero-top">
+                <span class="badge" id="verdictBadge">INIT</span>
+                <span class="timer" id="elapsedTimer">--:--</span>
+              </div>
+              <h1 class="hero-title" id="verdictHeadline">Connecting to local monitor…</h1>
+              <p class="hero-desc" id="verdictSummary">Reading Hooks, transcript logs &amp; network probes.</p>
+            </div>
+          </div>
+
+          <div class="alert-strip" id="alertStrip">
+            <div id="alertStripLead"><strong>Action:</strong> The main UI may still show "Working", but upstream connectivity is lost.</div>
+            <div id="alertStripSteps">1. Check your network, proxy, or VPN connection; 2. If it stays stuck, cancel and retry.</div>
+            <div class="alert-actions">
+              <button type="button" class="alert-btn" id="btnAlertProbe" data-i18n="alertBtnProbe">Probe Now</button>
+              <button type="button" class="alert-btn" id="btnAlertProxy" data-i18n="alertBtnProxy">Proxy Settings</button>
+              <button type="button" class="alert-btn alert-btn-stop" id="btnAlertStopSim" data-i18n="alertBtnStopSim">Stop Drill</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="card card-flat chart-card" id="chartCard">
+          <div class="chart-header">
+            <h2 class="section-title" data-i18n="chartTitle">Upstream HTTPS Probe</h2>
+            <div class="chart-stats">
+              <span class="stat-pill"><span data-i18n="statNow">Now</span> <b id="rttNow">--</b></span>
+              <span class="stat-pill"><span data-i18n="statAvg">Avg</span> <b id="rttAvg">--</b></span>
+              <span class="stat-pill"><span data-i18n="statRate">Uptime</span> <b id="rttRate">--</b></span>
+            </div>
+          </div>
+          <div class="chart-sim-banner" id="chartSimBanner" data-i18n="chartSimNotice">Drill active: chart below still reflects real probes until drill ends</div>
+          <div class="chart-box">
+            <svg id="sparkSvg" viewBox="0 0 360 64" preserveAspectRatio="none"></svg>
+          </div>
+          <div class="chart-tooltip" id="chartTooltip">Waiting for first probe…</div>
+        </section>
+
+        <section class="card card-flat telemetry-group">
+          <div class="mini-card">
+            <div class="mini-head">
+              <span data-i18n="cardAgent">Agent Heartbeat</span>
+              <span class="mini-badge" id="agentSourceBadge">--</span>
+            </div>
+            <div class="mini-value" id="agentStepVal">--</div>
+            <div class="mini-sub" id="agentLogAge">No logs yet</div>
+          </div>
+
+          <div class="mini-card">
+            <div class="mini-head">
+              <span data-i18n="cardNet">Network Route</span>
+              <span class="mini-badge" id="netModeBadge">--</span>
+            </div>
+            <div class="mini-value" id="netStatusVal">--</div>
+            <div class="mini-sub" id="netTargetVal">--</div>
+          </div>
+
+          <div class="mini-card">
+            <div class="mini-head">
+              <span data-i18n="cardLs">Language Server</span>
+              <span class="mini-badge" id="lsHealthBadge">--</span>
+            </div>
+            <div class="mini-value" id="lsConnVal">--</div>
+            <div class="mini-sub" id="lsPidVal">--</div>
+          </div>
+        </section>
       </div>
-      <div class="timeline-list" id="timelineList">
-        <div class="empty-state">No events for this chat yet. Start a message or wait for probe changes.</div>
+
+      <div class="col-secondary">
+        <section class="card card-flat token-card">
+          <div class="token-header">
+            <h2 class="section-title" data-i18n="tokenTitle">Token Usage</h2>
+            <div class="token-badges">
+              <span class="token-pill cache" id="tokCacheRate">Cache --</span>
+            </div>
+          </div>
+          <div class="token-cols">
+            <div class="token-stat">
+              <div class="token-stat-label" data-i18n="tokLastLabel">Context</div>
+              <div class="token-stat-val" id="tokLastCtx">--</div>
+            </div>
+            <div class="token-stat">
+              <div class="token-stat-label" data-i18n="tokSessLabel">Session</div>
+              <div class="token-stat-val" id="tokSessTotal">--</div>
+            </div>
+            <div class="token-stat">
+              <div class="token-stat-label" data-i18n="tokTodayLabel">Today Total</div>
+              <div class="token-stat-val" id="tokTodayTotal">--</div>
+            </div>
+          </div>
+          <div class="token-bar-track" id="tokBarTrack" data-tip="Session token breakdown" data-i18n-title="tokBarTitle">
+            <div class="token-seg-in" id="tokBarIn"></div>
+            <div class="token-seg-cache" id="tokBarCache"></div>
+            <div class="token-seg-out" id="tokBarOut"></div>
+          </div>
+          <details class="token-details" id="tokenDetails">
+            <summary class="token-details-toggle">
+              <span class="token-details-label" data-i18n="tokDetailsToggle">Breakdown</span>
+              <span class="token-summary-meta" id="tokCalls">-- calls</span>
+            </summary>
+            <div class="token-details-body">
+              <div class="token-legend">
+                <span class="legend-item"><i class="legend-dot legend-dot-in"></i><span data-i18n="legInput">Input</span> <b id="tokLegIn">--</b></span>
+                <span class="legend-item"><i class="legend-dot legend-dot-cache"></i><span data-i18n="legCache">Cache Read</span> <b id="tokLegCache">--</b></span>
+                <span class="legend-item"><i class="legend-dot legend-dot-out"></i><span data-i18n="legOut">Output</span> <b id="tokLegOut">--</b></span>
+              </div>
+              <div class="token-sub-grid">
+                <div class="token-sub-item">
+                  <span data-i18n="tokLastLabel">Context</span>
+                  <b id="tokLastSub">Out --</b>
+                </div>
+                <div class="token-sub-item">
+                  <span data-i18n="tokSessLabel">Session</span>
+                  <b id="tokSessSub">In -- · Out --</b>
+                </div>
+                <div class="token-sub-item">
+                  <span data-i18n="tokTodayLabel">Today Total</span>
+                  <b id="tokTodaySub">-- chats</b>
+                </div>
+              </div>
+              <p class="token-footnote" id="tokFootnote" data-i18n="tokFootnote">Raw token sum (including cache reads) for workload tracking; not official billing or quota.</p>
+            </div>
+          </details>
+        </section>
+
+        <section class="card card-flat timeline-card">
+          <div class="timeline-head">
+            <h2 class="section-title" data-i18n="timelineTitle">Chat Event Stream</h2>
+            <span class="tl-time" id="convBadge">Chat: --</span>
+          </div>
+          <div class="timeline-list" id="timelineList">
+            <div class="empty-state">No events for this chat yet. Send a message to see run stages and network changes.</div>
+          </div>
+        </section>
       </div>
-    </section>
+    </div>
 
     <footer class="footer-meta">
-      <span id="tokenInfo">Tokens: --</span>
+      <span id="tokenInfo">All-time: --</span>
       <span id="lastRefresh">Sync: --</span>
     </footer>
   </main>
+  <div class="ui-tooltip" id="uiTooltip" role="tooltip" aria-hidden="true"></div>
 </body>
 </html>

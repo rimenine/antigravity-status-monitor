@@ -240,6 +240,10 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.doesNotMatch(html, /var\(--(accent|ok|tool)\)/);
     assert.ok(htmlIds.has("btnLangZh") && htmlIds.has("btnLangEn"));
     assert.ok(htmlIds.has("actionBanner") && htmlIds.has("convBadge"));
+    assert.ok(htmlIds.has("uiTooltip") && htmlIds.has("settingsHelp") && htmlIds.has("tokenDetails"));
+    assert.ok(
+      htmlIds.has("btnAlertProbe") && htmlIds.has("btnAlertProxy") && htmlIds.has("btnAlertStopSim"),
+    );
     assert.equal(htmlIds.has("convSelect"), false);
     assert.match(frontendCode, /netRetry/);
     assert.match(frontendCode, /modePacUnsupported/);
@@ -260,7 +264,8 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
     assert.match(stylesCss, /--mon-ok/);
     assert.match(stylesCss, /--mon-tool/);
     assert.match(stylesCss, /\.theme-probe\s*\{/);
-    assert.match(stylesCss, /\.setting-row\s+select[\s\S]*?max-width:\s*58%/);
+    assert.match(stylesCss, /\.ui-tooltip\b/);
+    assert.match(stylesCss, /\.setting-row\s+select[\s\S]*?max-width:\s*62%/);
     assert.match(stylesCss, /\.setting-row\s+select[\s\S]*?min-width:\s*0/);
 
     const pluginJson = JSON.parse(readFileSync(join(PLUGIN_ROOT, "plugin.json"), "utf8"));
@@ -628,6 +633,9 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
           append: function (...args) {
             this.children.push(...args);
           },
+          prepend: function (...args) {
+            this.children.unshift(...args);
+          },
           replaceChildren: function (frag) {
             this.children = frag?.children ? [...frag.children] : [];
           },
@@ -753,17 +761,17 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         }
 
         // 1. 首屏严格绑定宿主当前空闲会话 conv-idle（不提供手动切换器，也不会主动拉取 conversationId=auto）
-        await waitUntil(() => elements.get("verdictBadge").textContent.includes("IDLE"));
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("空闲"));
         assert.match(elements.get("convBadge").textContent, /conv-idl/);
         assert.equal(fetchCalls.some((u) => String(u).includes("conversationId=auto")), false);
 
-        // 2. 点击 #btnSim 开启预览告警 -> UI 切换告警 -> 再点击关闭 -> 恢复 IDLE
+        // 2. 点击 #btnSim 开启预览告警 -> UI 切换告警 -> 再点击关闭 -> 恢复空闲
         elements.get("btnSim").trigger("click");
-        await waitUntil(() => elements.get("verdictBadge").textContent.includes("ALERT"));
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("断网挂起"));
         assert.equal(elements.get("btnSim").classList.contains("danger-active"), true);
 
         elements.get("btnSim").trigger("click");
-        await waitUntil(() => elements.get("verdictBadge").textContent.includes("IDLE"));
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("空闲"));
         assert.equal(elements.get("btnSim").classList.contains("danger-active"), false);
 
         // 3. 操作失败提示显示在独立 #actionBanner，且后续 pollStatus/render 不冲掉它
@@ -776,27 +784,27 @@ describe("前端 DOM ID 一致性与 SDK 桥接降级行为", () => {
         await new Promise((r) => setTimeout(r, 120));
         assert.equal(elements.get("actionBanner").classList.contains("visible"), true);
 
-        // 4. 仅当宿主窗口（sidecar.conversationId）切换为 conv-busy 时，面板才随用户切换并显示 PreInvocation 真实距今秒数
+        // 4. 仅当宿主窗口（sidecar.conversationId）切换为 conv-busy 时，面板才随用户切换并显示开始调用真实距今秒数
         winObj.sidecar.conversationId = "conv-busy";
         winObj.emit("focus");
-        await waitUntil(() => elements.get("verdictBadge").textContent.includes("WORKING"));
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("模型响应中"));
         assert.match(elements.get("convBadge").textContent, /conv-bus/);
-        assert.match(elements.get("agentLogAge").textContent, /PreInvocation · \d+s/);
+        assert.match(elements.get("agentLogAge").textContent, /开始调用 · \d+s 前/);
         assert.doesNotMatch(elements.get("agentLogAge").textContent, /前写入/);
         assert.equal(fetchCalls.some((u) => String(u).includes("conversationId=auto")), false);
 
-        // 4b. 切换到写入了 ERROR_MESSAGE 的 conv-err-ui 时，前端正确渲染 RETRY · 接口报错与 API 报错 #1 写入秒数
+        // 4b. 切换到写入了 ERROR_MESSAGE 的 conv-err-ui 时，前端正确渲染 接口重试 与 API 报错 #1 写入秒数
         winObj.sidecar.conversationId = "conv-err-ui";
         winObj.emit("focus");
-        await waitUntil(() => elements.get("verdictBadge").textContent.includes("RETRY"));
-        assert.match(elements.get("verdictBadge").textContent, /RETRY · 接口报错/);
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("接口重试"));
+        assert.match(elements.get("verdictBadge").textContent, /接口重试/);
         assert.match(elements.get("agentLogAge").textContent, /API 报错 #1 · \d+s 前写入/);
 
-        // 4c. 切换到后台任务运行中的 conv-bg-ui 时，前端正确渲染 BACKGROUND · 后台任务与后台等待秒数
+        // 4c. 切换到后台任务运行中的 conv-bg-ui 时，前端正确渲染 后台待唤醒 与后台等待秒数
         winObj.sidecar.conversationId = "conv-bg-ui";
         winObj.emit("focus");
-        await waitUntil(() => elements.get("verdictBadge").textContent.includes("BACKGROUND"));
-        assert.match(elements.get("verdictBadge").textContent, /BACKGROUND · 后台任务/);
+        await waitUntil(() => elements.get("verdictBadge").textContent.includes("后台待唤醒"));
+        assert.match(elements.get("verdictBadge").textContent, /后台待唤醒/);
         assert.match(elements.get("agentLogAge").textContent, /后台任务 · \d+s 前/);
 
         // 5. 切到隐藏页签后停止轮询请求，防止后台窗口耗尽 HTTP/1.1 6 连接池

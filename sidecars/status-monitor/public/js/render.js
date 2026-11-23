@@ -1,8 +1,8 @@
 (function (ns) {
   function buildSparklineSvg(list, d, format) {
     const w = 360;
-    const h = 72;
-    const padTop = 18;
+    const h = 64;
+    const padTop = 8;
     const padBottom = 6;
     const usableH = h - padTop - padBottom;
     const maxLat = Math.max(300, ...list.map((p) => (p.ok ? p.latencyMs : 0)));
@@ -39,10 +39,12 @@
     const dots = coords
       .map((c, idx) => {
         if (!c.p.ok) {
-          return `<rect x="${(c.x - 2.2).toFixed(1)}" y="${padTop}" width="4.4" height="${usableH}" rx="2" fill="var(--mon-danger)" opacity="0.82"><title>${format.fmtTime(c.p.ts)} ${d.fail}: ${format.escapeHtml(c.p.error)}</title></rect>`;
+          const tip = format.escapeHtml(`${format.fmtTime(c.p.ts)} ${d.fail}: ${c.p.error || d.timeout}`);
+          return `<rect x="${(c.x - 2.2).toFixed(1)}" y="${padTop}" width="4.4" height="${usableH}" rx="2" fill="var(--mon-danger)" stroke="transparent" stroke-width="5" opacity="0.82" data-tip="${tip}"/>`;
         }
         const isLast = idx === coords.length - 1;
-        return `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${isLast ? 3.3 : 1.7}" fill="var(--mon-ok)" opacity="${isLast ? 1 : 0.55}"><title>${format.fmtTime(c.p.ts)} ${c.p.latencyMs} ms</title></circle>`;
+        const tip = format.escapeHtml(`${format.fmtTime(c.p.ts)} ${c.p.latencyMs} ms`);
+        return `<circle cx="${c.x.toFixed(1)}" cy="${c.y.toFixed(1)}" r="${isLast ? 3.3 : 1.7}" fill="var(--mon-ok)" stroke="transparent" stroke-width="6" opacity="${isLast ? 1 : 0.55}" data-tip="${tip}"/>`;
       })
       .join("");
 
@@ -72,6 +74,20 @@
       : d.latestFail(format.fmtTime(last.ts), last.error || d.timeout, dualNote);
   }
 
+  function setTip(el, text, { markHelp = false } = {}) {
+    if (!el) return;
+    const msg = String(text || "").trim();
+    if (msg) {
+      el.setAttribute("data-tip", msg);
+      el.removeAttribute("title");
+      if (markHelp) el.classList.add("has-tip");
+    } else {
+      el.removeAttribute("data-tip");
+      el.removeAttribute("title");
+      if (markHelp) el.classList.remove("has-tip");
+    }
+  }
+
   function renderSparkline(probes) {
     const { $, state, i18n, format } = ns;
     const d = i18n.dict();
@@ -82,6 +98,7 @@
         state.lastSparkSig = "empty:" + state.currentLang;
         svg.innerHTML = "";
         format.setText("chartTooltip", d.chartWait);
+        setTip(tooltip, "", { markHelp: true });
       }
       return;
     }
@@ -99,55 +116,125 @@
 
     const tipText = buildSparklineTooltip(last, d, format);
     tooltip.textContent = tipText;
-    tooltip.title = tipText;
+    setTip(
+      tooltip,
+      last.ok && last.statusCode >= 400 && last.statusCode < 500 && d.latestOk404Note ? d.latestOk404Note : "",
+      { markHelp: true },
+    );
   }
 
-  function createTimelineItemEl(ev) {
+  function getTimelineLevelInfo(ev, d) {
+    const level = ev?.level || "info";
+    const label = d.tlLevels?.[level] || d.tlLevels?.info || level;
+    return { level, label, showTag: level === "warn" || level === "error" };
+  }
+
+  function syncTimelineItemEl(row, ev, d) {
     const { format } = ns;
+    const { level, label, showTag } = getTimelineLevelInfo(ev, d);
+
+    const dot = row.querySelector(".tl-dot");
+    if (dot) {
+      dot.className = `tl-dot ${level}`;
+      dot.setAttribute("role", "img");
+      dot.setAttribute("aria-label", label);
+    }
+
+    const titleEl = row.querySelector(".tl-title");
+    if (titleEl) {
+      let tagEl = titleEl.querySelector(".tl-level-tag");
+      if (showTag) {
+        if (!tagEl) {
+          tagEl = document.createElement("span");
+          titleEl.prepend(tagEl);
+        }
+        tagEl.className = `tl-level-tag ${level}`;
+        if (tagEl.textContent !== label) tagEl.textContent = label;
+      } else if (tagEl) {
+        tagEl.remove();
+      }
+      const titleTextEl = titleEl.querySelector(".tl-title-text");
+      if (titleTextEl && titleTextEl.textContent !== (ev.title || "")) {
+        titleTextEl.textContent = ev.title || "";
+      }
+    }
+
+    const bodyEl = row.querySelector(".tl-body");
+    let detailEl = row.querySelector(".tl-detail");
+    if (ev.detail) {
+      if (!detailEl && bodyEl) {
+        detailEl = document.createElement("div");
+        detailEl.className = "tl-detail";
+        bodyEl.appendChild(detailEl);
+      }
+      if (detailEl && detailEl.textContent !== ev.detail) {
+        detailEl.textContent = ev.detail;
+      }
+    } else if (detailEl) {
+      detailEl.remove();
+    }
+
+    const timeEl = row.querySelector(".tl-time");
+    const nextTime = format.fmtTime(ev.ts);
+    if (timeEl && timeEl.textContent !== nextTime) {
+      timeEl.textContent = nextTime;
+    }
+  }
+
+  function createTimelineItemEl(ev, d) {
     const row = document.createElement("div");
     row.className = "tl-item";
     row.dataset.eventId = ev.id;
 
     const dot = document.createElement("span");
-    dot.className = `tl-dot ${ev.level || "info"}`;
-
+    dot.className = "tl-dot";
     const body = document.createElement("div");
     body.className = "tl-body";
 
     const title = document.createElement("div");
     title.className = "tl-title";
-    title.textContent = ev.title || "";
+    const titleText = document.createElement("span");
+    titleText.className = "tl-title-text";
+    title.appendChild(titleText);
     body.appendChild(title);
-
-    if (ev.detail) {
-      const detail = document.createElement("div");
-      detail.className = "tl-detail";
-      detail.textContent = ev.detail;
-      body.appendChild(detail);
-    }
 
     const time = document.createElement("span");
     time.className = "tl-time";
-    time.textContent = format.fmtTime(ev.ts);
 
     row.append(dot, body, time);
+    syncTimelineItemEl(row, ev, d);
     return row;
+  }
+
+  function updateTimelineFade(tl) {
+    if (!tl) return;
+    const hasMore =
+      tl.scrollHeight > tl.clientHeight + 2 && tl.scrollTop + tl.clientHeight < tl.scrollHeight - 4;
+    tl.classList.toggle("has-more-bottom", hasMore);
   }
 
   function renderTimeline(events) {
     const { $, state, i18n, format } = ns;
     const d = i18n.dict();
     const tl = $("timelineList");
+    if (tl && !tl.dataset.fadeBound) {
+      tl.dataset.fadeBound = "1";
+      tl.addEventListener("scroll", () => updateTimelineFade(tl), { passive: true });
+    }
     const slice = Array.isArray(events) ? events.slice(0, 15) : [];
     const sig =
       slice.length === 0
         ? `empty:${state.currentLang}`
-        : `${state.currentLang}|` + slice.map((e) => `${e.id}:${e.title}:${e.detail}`).join("|");
-    if (sig === state.lastTimelineSig) return;
+        : `${state.currentLang}|` + slice.map((e) => `${e.id}:${e.level || ""}:${e.title}:${e.detail}`).join("|");
+    if (sig === state.lastTimelineSig) {
+      updateTimelineFade(tl);
+      return;
+    }
     state.lastTimelineSig = sig;
 
     if (slice.length === 0) {
       tl.innerHTML = `<div class="empty-state">${format.escapeHtml(d.timelineEmpty)}</div>`;
+      updateTimelineFade(tl);
       return;
     }
 
@@ -163,31 +250,32 @@
     for (const ev of slice) {
       const existing = existingById.get(ev.id);
       if (existing) {
-        const titleEl = existing.querySelector(".tl-title");
-        const detailEl = existing.querySelector(".tl-detail");
-        if (titleEl && titleEl.textContent !== (ev.title || "")) {
-          titleEl.textContent = ev.title || "";
-        }
-        if (detailEl && detailEl.textContent !== (ev.detail || "")) {
-          detailEl.textContent = ev.detail || "";
-        }
+        syncTimelineItemEl(existing, ev, d);
         frag.appendChild(existing);
       } else {
-        frag.appendChild(createTimelineItemEl(ev));
+        frag.appendChild(createTimelineItemEl(ev, d));
       }
     }
     tl.replaceChildren(frag);
     if (prevScrollTop > 4) {
       tl.scrollTop = prevScrollTop;
     }
+    updateTimelineFade(tl);
   }
 
-  function showCfgError(msg) {
+  function showCfgError(msg, { isProxyError = false } = {}) {
     const el = ns.$("cfgError");
+    const proxyInput = ns.$("cfgManualProxy");
+    const hasErr = Boolean(msg);
+    ns.state.hasCfgError = hasErr;
+    ns.state.hasProxyError = Boolean(hasErr && isProxyError);
+    if (proxyInput) {
+      if (ns.state.hasProxyError) proxyInput.setAttribute("aria-invalid", "true");
+      else proxyInput.removeAttribute("aria-invalid");
+    }
     if (!el) return;
-    ns.state.hasCfgError = Boolean(msg);
     el.textContent = msg || "";
-    el.classList.toggle("visible", ns.state.hasCfgError);
+    el.classList.toggle("visible", hasErr);
   }
 
   function syncSettings(config) {
@@ -209,7 +297,7 @@
     if (!state.hasCfgError && document.activeElement !== $("cfgProbeUrl")) {
       $("cfgProbeUrl").value = config.probeUrl;
     }
-    if (!state.hasCfgError && document.activeElement !== $("cfgManualProxy")) {
+    if (!state.hasProxyError && !state.proxyDraftDirty && document.activeElement !== $("cfgManualProxy")) {
       $("cfgManualProxy").value = config.manualProxyUrl || "";
     }
     if (document.activeElement !== $("cfgTheme")) $("cfgTheme").value = config.theme || "auto";
@@ -227,14 +315,29 @@
       $("orbIcon").innerHTML = ICONS[verdict.severity] || ICONS.ok;
     }
 
+    const isSim = Boolean(simulation?.active);
+    const simLeftSec =
+      isSim && simulation?.expiresAt && data.now
+        ? Math.max(0, Math.ceil((simulation.expiresAt - data.now) / 1000))
+        : null;
+
     format.setText("verdictBadge", d.badges[verdict.code] || verdict.code);
-    format.setText("elapsedTimer", verdict.phase === "idle" ? "READY" : format.fmtElapsed(verdict.elapsedSec));
+    format.setText(
+      "elapsedTimer",
+      isSim
+        ? d.simTimer(simLeftSec)
+        : verdict.phase === "idle"
+          ? d.timerReady
+          : format.fmtElapsed(verdict.elapsedSec),
+    );
     format.setText("verdictHeadline", verdict.headline);
     format.setText("verdictSummary", verdict.summary);
 
     $("alertStrip").classList.toggle("visible", verdict.code === "DISCONNECTED_HANG");
-    $("btnSim").classList.toggle("danger-active", Boolean(simulation?.active));
-    format.setText("btnSimText", simulation?.active ? d.btnSimStop : d.btnSimStart);
+    $("btnAlertStopSim")?.classList.toggle("visible", isSim);
+    $("chartCard")?.classList.toggle("is-simulating", isSim);
+    $("btnSim").classList.toggle("danger-active", isSim);
+    format.setText("btnSimText", isSim ? d.btnSimStop : d.btnSimStart);
 
     const latestProbe = metrics.latestProbe;
     format.setText("rttNow", latestProbe ? (latestProbe.ok ? `${latestProbe.latencyMs}ms` : d.timeout) : "--");
@@ -256,7 +359,8 @@
       return `${tag} · ${silentText}`;
     }
     if (hook.lastEvent) {
-      return useHookAge ? `${hook.lastEvent} · ${d.hookAgo(verdict.hookAgeSec)}` : `${hook.lastEvent} · ${silentText}`;
+      const hookLabel = d.hookEvents?.[hook.lastEvent] || hook.lastEvent;
+      return useHookAge ? `${hookLabel} · ${d.hookAgo(verdict.hookAgeSec)}` : `${hookLabel} · ${silentText}`;
     }
     return silentText;
   }
@@ -271,7 +375,7 @@
       verdict.source === "hook" ? d.srcHooks : verdict.source === "transcript" ? d.srcLog : d.srcWait,
     );
     const stepNum = transcript.latestStepIndex ?? hook.stepIdx;
-    format.setText("agentStepVal", stepNum != null ? `Step #${stepNum}` : d.waitActivity);
+    format.setText("agentStepVal", stepNum != null ? d.stepLabel(stepNum) : d.waitActivity);
     format.setText("agentLogAge", formatHeartbeatAge(verdict, hook, transcript, d));
 
     const proxyCfg = latestProbe?.proxyConfig || data.proxyConfig;
@@ -291,18 +395,21 @@
               ? d.proxyShort
               : d.modeDirect;
     format.setText("netModeBadge", modeText);
-    if ($("netModeBadge")) {
-      $("netModeBadge").title = isPacUnsupported ? d.pacTooltip(proxyCfg?.pacUrl || "") : "";
-    }
+    setTip($("netModeBadge"), isPacUnsupported ? d.pacTooltip(proxyCfg?.pacUrl || "") : "", { markHelp: true });
+    const isSim = Boolean(data.simulation?.active);
     format.setText(
       "netStatusVal",
-      verdict.networkDown
-        ? d.netDown(metrics.consecutiveFailures)
-        : latestProbe?.ok
-          ? d.netHealthy
-          : latestProbe
-            ? d.netRetry(metrics.consecutiveFailures || 1)
-            : d.netProbing,
+      isSim
+        ? d.netSimDown
+        : verdict.networkDown
+          ? metrics.consecutiveFailures > 0
+            ? d.netDown(metrics.consecutiveFailures)
+            : d.netDownNoCount
+          : latestProbe?.ok
+            ? d.netHealthy
+            : latestProbe
+              ? d.netRetry(metrics.consecutiveFailures || 1)
+              : d.netProbing,
     );
     const hostLabel = config.probeUrl.replace(/^https?:\/\//, "").split("/")[0];
     const dualDirect = latestProbe?.dual?.direct;
@@ -315,14 +422,15 @@
           ? `PAC · ${hostLabel}`
           : hostLabel,
     );
-    if ($("netTargetVal")) {
-      $("netTargetVal").title = isPacUnsupported ? d.pacTooltip(proxyCfg?.pacUrl || "") : "";
-    }
+    setTip($("netTargetVal"), isPacUnsupported ? d.pacTooltip(proxyCfg?.pacUrl || "") : "", { markHelp: true });
 
-    const hs = ls.healthz?.reachable === true ? "healthz OK" : ls.running ? d.lsRunning : ls.running === null ? d.lsUnavailable : d.lsNotFound;
+    const isLsHealthy = ls.healthz?.reachable === true;
+    const hs = isLsHealthy ? d.lsHealthy : ls.running ? d.lsRunning : ls.running === null ? d.lsUnavailable : d.lsNotFound;
     format.setText("lsHealthBadge", hs);
+    setTip($("lsHealthBadge"), isLsHealthy ? d.lsHealthyTitle : "", { markHelp: true });
     const connText = ls.running === null ? d.lsSkipped : ls.running === false ? d.lsStopped : d.lsConns(ls.established443, ls.synSent443);
     format.setText("lsConnVal", connText);
+    setTip($("lsConnVal"), ls.running ? d.lsConnsTitle : "", { markHelp: true });
     const routeTag = d.routeTag[ls.route] || "";
     format.setText("lsPidVal", ls.pids?.length ? `PID: ${ls.pids.join(", ")}${routeTag}` : "PID: --");
   }
@@ -348,17 +456,18 @@
     format.setText("tokLastCtx", last ? format.fmtTokens(last.contextTotal) : "--");
     format.setText(
       "tokLastSub",
-      last ? d.lastSub(format.fmtTokens(last.input), format.fmtTokens(last.output)) : "Out --",
+      last ? d.lastSub(format.fmtTokens(last.input), format.fmtTokens(last.output)) : d.lastSubEmpty,
     );
     format.setText("tokSessTotal", sess ? format.fmtTokens(sess.total) : "--");
     format.setText(
       "tokSessSub",
-      sess ? `In ${format.fmtTokens(sess.input)} · Out ${format.fmtTokens(sess.output)}` : "In -- / Out --",
+      sess ? d.sessSub(format.fmtTokens(sess.input), format.fmtTokens(sess.output)) : d.sessSubEmpty,
     );
     format.setText("tokTodayTotal", today ? format.fmtTokens(today.total) : "--");
     format.setText("tokTodaySub", d.todaySub(today?.sessions, today?.calls));
 
     const barTotal = sess?.total || 0;
+    $("tokBarTrack")?.classList.toggle("is-empty", barTotal <= 0);
     $("tokBarIn").style.width = barTotal > 0 ? `${((sess.input / barTotal) * 100).toFixed(1)}%` : "0%";
     $("tokBarCache").style.width = barTotal > 0 ? `${((sess.cacheRead / barTotal) * 100).toFixed(1)}%` : "0%";
     $("tokBarOut").style.width = barTotal > 0 ? `${((sess.output / barTotal) * 100).toFixed(1)}%` : "0%";
@@ -373,8 +482,8 @@
       allTok
         ? d.allTime(format.fmtTokens(allTok.total), allTok.sessions)
         : transcript.tokens
-          ? `Tokens In:${transcript.tokens.input ?? "-"} Out:${transcript.tokens.output ?? "-"}`
-          : "Tokens: --",
+          ? d.tokensFallback(transcript.tokens.input ?? "-", transcript.tokens.output ?? "-")
+          : d.tokensEmpty,
     );
   }
 
@@ -400,12 +509,11 @@
 
     const convId = data.activeConversationId || hook.conversationId || transcript.conversationId;
     format.setText("convBadge", d.convLabel(convId));
-    if ($("convBadge")) {
-      $("convBadge").title = "";
-    }
+    setTip($("convBadge"), convId || "", { markHelp: true });
 
     renderTimeline(events);
     format.setText("lastRefresh", d.syncTime(format.fmtTime(data.now)));
+    ns.syncTooltip?.();
   }
 
   ns.render = { render, renderSparkline, renderTimeline, showCfgError, syncSettings };

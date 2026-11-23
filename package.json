@@ -3,7 +3,7 @@
   "version": "1.0.4",
   "private": true,
   "type": "module",
-  "description": "Antigravity Status Monitor plugin with Sidecar dashboard, Lifecycle Hooks, and zero-dependency test suite.",
+  "description": "Lightweight, zero-dependency Antigravity Status Monitor plugin with Sidecar dashboard, Lifecycle Hooks, and automated tests.",
   "author": "rimenine <356597235+rimenine@users.noreply.github.com>",
   "license": "MIT",
   "homepage": "https://github.com/rimenine/antigravity-status-monitor#readme",

@@ -15,6 +15,8 @@
     let pollInFlight = null;
     let pollAbortController = null;
     let actionBannerTimer = null;
+    let consecutivePollFailures = 0;
+    let persistentBannerReason = null;
     const syncChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("asm-status-sync") : null;
 
     function normalizeConvId(raw) {
@@ -99,7 +101,10 @@
       );
       if (!res.ok) {
         const errData = await res.json().catch(() => null);
-        throw new Error(errData?.detail || errData?.error || `HTTP ${res.status}`);
+        const err = new Error(errData?.detail || errData?.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        err.code = errData?.errorCode || errData?.error || "";
+        throw err;
       }
       return res.json();
     }
@@ -118,10 +123,55 @@
       dot.classList.toggle("offline", !pollHealthy);
     }
 
+    function getPersistentBannerText(reason) {
+      const d = i18n.dict();
+      if (reason === "auth") return d.authExpiredBanner;
+      if (reason === "offline") return d.sidecarDisconnectedBanner;
+      return "";
+    }
+
+    function renderPersistentBanner() {
+      if (!persistentBannerReason) return;
+      const banner = $("actionBanner");
+      if (!banner) return;
+      const msg = getPersistentBannerText(persistentBannerReason);
+      if (!msg) return;
+      banner.textContent = msg;
+      banner.classList.add("visible");
+    }
+
+    function showPersistentBanner(reason) {
+      persistentBannerReason = reason;
+      if (actionBannerTimer) {
+        clearTimeout(actionBannerTimer);
+        actionBannerTimer = null;
+      }
+      renderPersistentBanner();
+    }
+
+    function clearPersistentBanner() {
+      if (!persistentBannerReason) return;
+      persistentBannerReason = null;
+      if (actionBannerTimer) return;
+      const banner = $("actionBanner");
+      if (!banner) return;
+      banner.textContent = "";
+      banner.classList.remove("visible");
+    }
+
+    function syncPersistentBannerLang() {
+      if (!persistentBannerReason || actionBannerTimer) return;
+      renderPersistentBanner();
+    }
+
     function clearActionError() {
       if (actionBannerTimer) {
         clearTimeout(actionBannerTimer);
         actionBannerTimer = null;
+      }
+      if (persistentBannerReason) {
+        renderPersistentBanner();
+        return;
       }
       const banner = $("actionBanner");
       if (!banner) return;
@@ -130,8 +180,8 @@
     }
 
     function reportActionError(err) {
-      const prefix = i18n.dict().actionFailedPrefix;
-      const msg = `${prefix}${err?.message || "unknown"}`;
+      const d = i18n.dict();
+      const msg = `${d.actionFailedPrefix}${err?.message || d.unknownError}`;
       const banner = $("actionBanner");
       if (banner) {
         banner.textContent = msg;
@@ -168,26 +218,54 @@
           if (!res.ok) {
             if ((res.status === 401 || res.status === 403) && !state.lastData) {
               const d = i18n.dict();
+              $("ambientGlow")?.style.setProperty(
+                "--hero-glow",
+                ns.GLOW_COLORS?.danger || "var(--mon-danger-soft)",
+              );
+              $("heroCard")?.setAttribute("data-severity", "danger");
+              if ($("orbIcon") && ns.ICONS?.danger) {
+                $("orbIcon").innerHTML = ns.ICONS.danger;
+              }
+              state.lastSeverity = "danger";
               format.setText("verdictBadge", d.authDeniedBadge);
               format.setText("verdictHeadline", d.authDeniedHeadline);
               format.setText("verdictSummary", d.authDeniedSummary);
             }
-            throw new Error(`HTTP ${res.status}`);
+            const httpErr = new Error(`HTTP ${res.status}`);
+            httpErr.status = res.status;
+            throw httpErr;
           }
           const data = await res.json();
           if (controller?.signal?.aborted || pollAbortController !== controller) {
             return data;
           }
           pollHealthy = true;
+          consecutivePollFailures = 0;
+          clearPersistentBanner();
           updateConnectionDot();
           onRender?.(data, getConvScope());
           return data;
-        } catch {
-          if (controller?.signal?.aborted && pollAbortController !== controller) {
+        } catch (err) {
+          if (
+            pollStopped ||
+            (controller?.signal?.aborted &&
+              (pollAbortController !== controller || controller.signal.reason?.message === "superseded"))
+          ) {
             return null;
           }
           pollHealthy = false;
           updateConnectionDot();
+          if (err?.status === 401 || err?.status === 403) {
+            consecutivePollFailures = 0;
+            if (state.lastData) {
+              showPersistentBanner("auth");
+            }
+          } else {
+            consecutivePollFailures += 1;
+            if (consecutivePollFailures >= 3 && persistentBannerReason !== "auth") {
+              showPersistentBanner("offline");
+            }
+          }
           return null;
         } finally {
           if (pollAbortController === controller) {
@@ -276,6 +354,7 @@
       notifySiblingPanels,
       clearActionError,
       reportActionError,
+      syncPersistentBannerLang,
       pollStatus,
       clearPollTimer,
       scheduleNextPoll,
