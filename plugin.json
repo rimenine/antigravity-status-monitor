@@ -1,7 +1,7 @@
 {
   "name": "agent-status-monitor",
   "displayName": "Antigravity Status Monitor",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A lightweight, zero-dependency side-pane monitor for Antigravity — combining agent phase, upstream network probes, and token usage so you can tell real progress from a silent \"Working\" hang at a glance.",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
